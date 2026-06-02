@@ -12,14 +12,14 @@ export default class GoogleSyncPlugin extends Plugin {
     await this.loadSettings();
     this.controller = new SyncController(this.app, this.settings, () => this.saveData(this.settings));
 
-    this.addRibbonIcon("refresh-cw", "Google Sync: sync now", () => void this.runSync());
+    this.addRibbonIcon("refresh-cw", "Google Cloud Sync: sync now", () => void this.runSync());
     this.addCommand({ id: "sync-now", name: "Sync now", callback: () => void this.runSync() });
     this.addCommand({
       id: "lock",
       name: "Lock (forget passphrase)",
       callback: () => {
         this.controller.lock();
-        new Notice("Google Sync: locked.");
+        new Notice("Google Cloud Sync: locked.");
       },
     });
     this.addSettingTab(new GoogleSyncSettingTab(this.app, this));
@@ -45,7 +45,7 @@ export default class GoogleSyncPlugin extends Plugin {
   async runSync(auto = false): Promise<void> {
     if (auto && !this.controller.unlocked) return; // don't nag while locked
     if (this.syncing) {
-      new Notice("Google Sync: a sync is already running…");
+      new Notice("Google Cloud Sync: a sync is already running…");
       return;
     }
     this.syncing = true;
@@ -53,11 +53,11 @@ export default class GoogleSyncPlugin extends Plugin {
       const r = await this.controller.sync();
       const dels = r.deletedLocal.length + r.deletedRemote.length;
       new Notice(
-        `Google Sync: ↑${r.uploaded.length} ↓${r.downloaded.length} ✗${dels} ⚠${r.conflicts.length}` +
+        `Google Cloud Sync: ↑${r.uploaded.length} ↓${r.downloaded.length} ✗${dels} ⚠${r.conflicts.length}` +
           (r.errors.length ? ` — ${r.errors.length} error(s)` : "")
       );
     } catch (e) {
-      new Notice(`Google Sync: ${(e as Error).message}`);
+      new Notice(`Google Cloud Sync: ${(e as Error).message}`);
     } finally {
       this.syncing = false;
     }
@@ -98,7 +98,7 @@ class GoogleSyncSettingTab extends PluginSettingTab {
     const s = this.plugin.settings;
     containerEl.empty();
 
-    new Setting(containerEl).setName("Google Sync").setHeading();
+    new Setting(containerEl).setName("Google Cloud Sync").setHeading();
 
     new Setting(containerEl)
       .setName("Provider")
@@ -175,9 +175,9 @@ class GoogleSyncSettingTab extends PluginSettingTab {
       b.setButtonText("Unlock").onClick(async () => {
         try {
           await this.plugin.controller.unlock(passphrase);
-          new Notice("Google Sync: unlocked.");
+          new Notice("Google Cloud Sync: unlocked.");
         } catch (e) {
-          new Notice(`Google Sync: ${(e as Error).message}`);
+          new Notice(`Google Cloud Sync: ${(e as Error).message}`);
         }
       })
     );
@@ -221,10 +221,10 @@ class GoogleSyncSettingTab extends PluginSettingTab {
           .onClick(async () => {
             try {
               await this.plugin.controller.connectDrive(passphrase);
-              new Notice("Google Sync: Google Drive connected.");
+              new Notice("Google Cloud Sync: Google Drive connected.");
               this.display();
             } catch (e) {
-              new Notice(`Google Sync: ${(e as Error).message}`);
+              new Notice(`Google Cloud Sync: ${(e as Error).message}`);
             }
           })
       );
@@ -276,10 +276,10 @@ class GoogleSyncSettingTab extends PluginSettingTab {
         .onClick(async () => {
           try {
             await this.plugin.controller.saveGcsCredentials(passphrase, accessId, secret);
-            new Notice("Google Sync: GCS credentials sealed + unlocked.");
+            new Notice("Google Cloud Sync: GCS credentials sealed + unlocked.");
             this.display();
           } catch (e) {
-            new Notice(`Google Sync: ${(e as Error).message}`);
+            new Notice(`Google Cloud Sync: ${(e as Error).message}`);
           }
         })
     );

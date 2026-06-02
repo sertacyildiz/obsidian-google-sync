@@ -1,4 +1,4 @@
-# Google Sync for Obsidian
+# Google Cloud Sync for Obsidian
 
 Sync your Obsidian vault to a **Google backend you own** — **Google Drive** or **Google Cloud Storage** — with **end-to-end encryption** and **no third-party server**. You bring your own Google Cloud; your notes and credentials never pass through anyone else's infrastructure.
 
@@ -15,13 +15,13 @@ Sync your Obsidian vault to a **Google backend you own** — **Google Drive** or
 
 1. Install the **BRAT** community plugin.
 2. BRAT → *Add beta plugin* → `sertacyildiz/obsidian-google-sync`.
-3. Enable **Google Sync** under *Community plugins*.
+3. Enable **Google Cloud Sync** under *Community plugins*.
 
 (Or build from source — see below.)
 
 ## Setup
 
-Open **Settings → Google Sync**. Set a **passphrase** (it powers E2EE and unseals your stored credential; it is never saved), choose a **sync folder** (or the whole vault), then configure a provider.
+Open **Settings → Google Cloud Sync**. Set a **passphrase** (it powers E2EE and unseals your stored credential; it is never saved), choose a **sync folder** (or the whole vault), then configure a provider.
 
 ### Google Drive
 1. In the [Google Cloud Console](https://console.cloud.google.com/): create a project, enable the **Drive API**, configure the **OAuth consent screen** (add yourself as a test user), and create an **OAuth client ID** of type **Desktop app**.
