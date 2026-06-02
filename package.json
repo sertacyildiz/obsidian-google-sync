@@ -1,0 +1,29 @@
+{
+  "name": "obsidian-google-sync",
+  "version": "0.1.0",
+  "description": "Comprehensive, security-first sync of your Obsidian vault to a Google backend you own (Google Drive or Google Cloud Storage).",
+  "main": "main.js",
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production"
+  },
+  "keywords": [
+    "obsidian",
+    "plugin",
+    "sync",
+    "google-drive",
+    "google-cloud-storage",
+    "gcs"
+  ],
+  "author": "Sertaç Yıldız",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "aws4": "^1.13.2",
+    "builtin-modules": "3.3.0",
+    "esbuild": "0.21.5",
+    "obsidian": "latest",
+    "tslib": "2.6.2",
+    "typescript": "5.4.5"
+  }
+}

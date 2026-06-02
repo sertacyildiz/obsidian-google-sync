@@ -1,0 +1,19 @@
+# build output
+main.js
+*.js.map
+
+# dependencies
+node_modules/
+
+# plugin local data
+data.json
+
+# os / editor
+.DS_Store
+.idea/
+.vscode/
+
+# secrets / local env
+.env
+.env.*
+*.hmac
