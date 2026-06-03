@@ -22,6 +22,7 @@ function makeApp(): unknown {
   return {
     vault: {
       configDir: ".obsidian",
+      getName: () => "Test Vault",
       getFiles: () => [],
       adapter: {
         readBinary: async () => new ArrayBuffer(0),

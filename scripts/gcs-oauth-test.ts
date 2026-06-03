@@ -29,6 +29,7 @@ function makeApp(): never {
   return {
     vault: {
       configDir: ".obsidian",
+      getName: () => "Test Vault",
       getFiles: () => [],
       adapter: {
         readBinary: async () => new ArrayBuffer(0),
@@ -162,6 +163,12 @@ async function main(): Promise<void> {
     check(
       "each backend keeps its own baseline (syncState has drive + gcs)",
       "drive" in settings.syncState && "gcs" in settings.syncState
+    );
+    const nestsUnderVault = (host: string) =>
+      record.some((r) => r.url.includes(host) && decodeURIComponent(r.url).replace(/\+/g, " ").includes("Test Vault"));
+    check(
+      "remote paths nest under the vault name (multi-vault collision-free)",
+      nestsUnderVault("storage.googleapis.com") && nestsUnderVault("googleapis.com/drive")
     );
   }
 

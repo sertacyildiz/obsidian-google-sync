@@ -152,7 +152,7 @@ class GoogleSyncSettingTab extends PluginSettingTab {
     if (s.driveEnabled) {
       new Setting(containerEl)
         .setName("Folder")
-        .setDesc(`Where in your Drive to sync. Leave blank for "${DEFAULT_APP_FOLDER}".`)
+        .setDesc(`Files sync under "${s.appFolderName || DEFAULT_APP_FOLDER}/${this.app.vault.getName()}" — the vault name is added automatically so multiple vaults never collide. Blank = "${DEFAULT_APP_FOLDER}".`)
         .addText((t) =>
           t
             .setPlaceholder(DEFAULT_APP_FOLDER)
@@ -308,6 +308,18 @@ class GoogleSyncSettingTab extends PluginSettingTab {
 
     // ---------------- Sync behaviour ----------------
     new Setting(containerEl).setName("Sync").setHeading();
+    new Setting(containerEl)
+      .setName("Sync now")
+      .setDesc(`Last synced: ${s.lastSyncAt ? new Date(s.lastSyncAt).toLocaleString() : "never"}`)
+      .addButton((b) =>
+        b
+          .setButtonText("Sync now")
+          .setCta()
+          .onClick(async () => {
+            await this.plugin.runSync();
+            this.display();
+          })
+      );
     new Setting(containerEl)
       .setName("Sync folder")
       .setDesc("Vault-relative folder to sync. Empty = whole vault.")

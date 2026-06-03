@@ -221,19 +221,25 @@ export class SyncController {
       merged.conflicts.push(...report.conflicts);
       merged.errors.push(...report.errors);
     }
+    this.settings.lastSyncAt = Date.now();
     await this.persist();
     return merged;
   }
 
   private buildProvider(id: BackendId): RemoteProvider {
+    // Each vault syncs under its own name so multiple vaults never collide:
+    // Drive → <base folder>/<vault>; GCS → <prefix>/<vault>.
+    const vault = this.app.vault.getName().trim();
     if (id === "drive") {
+      const base = this.settings.appFolderName || DEFAULT_APP_FOLDER;
       return new DriveProvider(
-        { appFolderName: this.settings.appFolderName || DEFAULT_APP_FOLDER },
+        { appFolderName: `${base}/${vault}` },
         () => this.getDriveToken(),
         this.http
       );
     }
-    const cfg = { bucket: this.settings.bucket, prefix: this.settings.prefix, endpoint: GCS_ENDPOINT };
+    const prefix = [this.settings.prefix.replace(/^\/+|\/+$/g, ""), vault].filter(Boolean).join("/");
+    const cfg = { bucket: this.settings.bucket, prefix, endpoint: GCS_ENDPOINT };
     if (this.settings.gcsAuthMode === "oauth") {
       return new GcsProvider(cfg, bearerAuthorizer(() => this.getGcsToken()), this.http);
     }

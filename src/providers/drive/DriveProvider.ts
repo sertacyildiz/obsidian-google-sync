@@ -60,24 +60,34 @@ export class DriveProvider implements RemoteProvider {
     return (text ? JSON.parse(text) : {}) as T;
   }
 
+  /**
+   * The sync folder id. `appFolderName` is treated as a "/"-separated path (e.g.
+   * "Obsidian Sync/My Vault"); each segment is found-or-created nested under the
+   * previous, starting at the Drive root — so each vault lives in its own
+   * subfolder and multiple vaults never collide.
+   */
   private async appFolder(): Promise<string> {
     if (this.folderId) return this.folderId;
-    const q = `mimeType='${FOLDER_MIME}' and name='${escapeDriveQuery(this.cfg.appFolderName)}' and 'root' in parents and trashed=false`;
+    let parent = "root";
+    for (const name of this.cfg.appFolderName.split("/").map((s) => s.trim()).filter(Boolean)) {
+      parent = await this.findOrCreateFolder(name, parent);
+    }
+    this.folderId = parent;
+    return this.folderId;
+  }
+
+  private async findOrCreateFolder(name: string, parent: string): Promise<string> {
+    const q = `mimeType='${FOLDER_MIME}' and name='${escapeDriveQuery(name)}' and '${parent}' in parents and trashed=false`;
     const res = await this.http(
       "GET",
       `${API}/files?q=${encodeURIComponent(q)}&fields=${encodeURIComponent("files(id,name)")}&spaces=drive`,
       await this.hdrs()
     );
     const data = await this.json<{ files?: DriveFile[] }>(res, "find-folder");
-    if (data.files && data.files.length && data.files[0].id) {
-      this.folderId = data.files[0].id;
-      return this.folderId;
-    }
-    const meta = JSON.stringify({ name: this.cfg.appFolderName, mimeType: FOLDER_MIME, parents: ["root"] });
+    if (data.files && data.files.length && data.files[0].id) return data.files[0].id;
+    const meta = JSON.stringify({ name, mimeType: FOLDER_MIME, parents: [parent] });
     const cr = await this.http("POST", `${API}/files?fields=id`, await this.hdrs({ "content-type": "application/json" }), new TextEncoder().encode(meta).buffer);
-    const created = await this.json<{ id: string }>(cr, "create-folder");
-    this.folderId = created.id;
-    return this.folderId;
+    return (await this.json<{ id: string }>(cr, "create-folder")).id;
   }
 
   private async findByPath(path: string): Promise<{ id: string; version: string; size: number } | null> {

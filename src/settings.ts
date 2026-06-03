@@ -42,6 +42,8 @@ export interface GoogleSyncSettings {
   autoSync: boolean;
   autoSyncMode: "on-change" | "interval";
   autoSyncIntervalMinutes: number;
+  /** Epoch ms of the last successful sync; null = never synced. */
+  lastSyncAt: number | null;
 
   // --- optional content end-to-end encryption (advanced; default off) ---
   e2ee: boolean;
@@ -74,6 +76,7 @@ export const DEFAULT_SETTINGS: GoogleSyncSettings = {
   autoSync: false,
   autoSyncMode: "interval",
   autoSyncIntervalMinutes: 15,
+  lastSyncAt: null,
 
   e2ee: false,
   salt: null,
