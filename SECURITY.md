@@ -13,13 +13,18 @@ public issue. You will get a response as soon as possible.
   shared OAuth app.
 - **No shipped secret.** Google Drive uses the installed-app OAuth2 **PKCE**
   flow (no client secret). Google Cloud Storage uses an HMAC key you create.
-- **Credentials encrypted at rest.** Your HMAC secret / Drive refresh token are
-  sealed with AES-256-GCM using a key derived (PBKDF2-SHA256) from your
-  passphrase. Plaintext secrets never touch disk, and the passphrase is never
-  stored.
 - **Credentials are never synced or logged.** The plugin excludes its own
   config directory from the synced set and never logs secrets or signed
-  material.
+  material. OAuth scopes are kept narrow (`drive.file` / a single bucket) so a
+  leak's blast radius is small.
+- **Encryption at rest is optional (passphrase).** If you set a passphrase, the
+  stored credential is sealed with AES-256-GCM (key derived via PBKDF2-SHA256;
+  passphrase never stored). Without one, the credential is kept in the plugin's
+  own (never-synced) config. We deliberately do **not** claim OS-keychain
+  encryption: Obsidian's native SecretStorage stored secrets in plaintext in
+  early 1.11.x and Electron `safeStorage` is not reliably reachable from a
+  plugin — so we don't pretend a key is protected when it isn't. We will adopt
+  SecretStorage once it is genuinely OS-encrypted.
 - **End-to-end content encryption (optional, recommended).** With E2EE enabled,
   files are encrypted on-device before upload, so a credential or backend
   compromise does not expose note content. A forgotten passphrase means the

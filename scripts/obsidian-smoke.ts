@@ -6,6 +6,7 @@
  *     --alias:obsidian=./scripts/_mock-obsidian.ts --outfile=/tmp/smoke.cjs && node /tmp/smoke.cjs
  */
 import GoogleSyncPlugin from "../src/main";
+import { SyncController } from "../src/SyncController";
 
 // Obsidian runs in a browser/Electron renderer; provide the globals the plugin uses.
 (globalThis as unknown as { window: unknown }).window = {
@@ -77,21 +78,41 @@ async function main(): Promise<void> {
   }
   check("settings tab display() builds the full UI without throwing", displayOk);
 
-  // credential seal/unlock through the real controller (real crypto) in plugin context
-  await plugin.controller.saveGcsCredentials("pw-123", "GOOGACCESSID", "the-secret");
+  // ---- credentials: passphrase is OPTIONAL ----
+  plugin.settings.provider = "gcs";
+
+  // (1) no passphrase → plaintext, ready immediately, no salt
+  await plugin.controller.saveGcsCredentials("GOOGACCESSID", "secret-A");
   check(
-    "saveGcsCredentials → unlocked + secret sealed (not plaintext on disk)",
-    plugin.controller.unlocked &&
-      typeof plugin.settings.sealedSecret === "string" &&
-      !plugin.settings.sealedSecret.includes("the-secret")
+    "no-passphrase save → plaintext (not encrypted), ready, no salt written",
+    plugin.settings.gcsSecret?.enc === false &&
+      plugin.settings.gcsSecret?.data === "secret-A" &&
+      plugin.controller.ready === true &&
+      plugin.settings.salt === null
+  );
+  // simulate a restart: a fresh controller over the same settings, prepare() with NO passphrase
+  {
+    const fresh = new SyncController(makeApp() as never, plugin.settings, async () => {});
+    await fresh.prepare();
+    check("after 'restart', plaintext creds auto-load (ready, no passphrase prompt)", fresh.ready === true);
+  }
+
+  // (2) with passphrase → encrypted at rest
+  await plugin.controller.saveGcsCredentials("GOOGACCESSID", "secret-B", "pw-123");
+  check(
+    "passphrase save → sealed (not plaintext), salt set",
+    plugin.settings.gcsSecret?.enc === true &&
+      !plugin.settings.gcsSecret?.data.includes("secret-B") &&
+      typeof plugin.settings.salt === "string"
   );
   plugin.controller.lock();
-  check("lock() clears the in-memory key", !plugin.controller.unlocked);
-  await plugin.controller.unlock("pw-123");
-  check("unlock() with the correct passphrase succeeds", plugin.controller.unlocked);
+  check("after lock, encrypted creds are locked (not ready)", plugin.controller.ready === false);
+  await plugin.controller.prepare("pw-123");
+  check("prepare(correct passphrase) unlocks → ready", plugin.controller.ready === true);
   plugin.controller.lock();
-  check("unlock() with a wrong passphrase fails", await throwsAsync(() => plugin.controller.unlock("wrong-pass")));
+  check("prepare(wrong passphrase) fails", await throwsAsync(() => plugin.controller.prepare("wrong-pass")));
 
+  // (3) auto-sync while locked is a quiet no-op
   plugin.controller.lock();
   let autoOk = true;
   try {

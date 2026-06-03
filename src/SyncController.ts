@@ -11,23 +11,25 @@ import { SyncReport } from "./sync/types";
 import { ObsidianLocalStore } from "./obsidian/ObsidianLocalStore";
 import { requestUrlHttp } from "./obsidian/requestUrlHttp";
 import { withRetry } from "./util/retry";
-import { GoogleSyncSettings } from "./settings";
+import { GoogleSyncSettings, StoredSecret } from "./settings";
 import { deriveAesKey } from "./crypto/aesgcm";
 import { PBKDF2_ITERATIONS, PassphraseCryptor, newSalt } from "./crypto/PassphraseCryptor";
 import { openSecret, sealSecret } from "./crypto/secret";
 import { base64Decode, base64Encode } from "./util/base64";
 
 /**
- * Wires the verified core (SyncEngine + provider + Cryptor + ObsidianLocalStore)
- * to the plugin. One master passphrase (held in memory only) derives the AES key
- * that unseals each provider's credential AND powers content E2EE.
+ * Wires the verified core to the plugin. The passphrase is OPTIONAL:
+ *  - no passphrase → credentials are stored as plaintext in data.json (which is
+ *    never synced) and load automatically; OAuth scopes are narrow so the leak
+ *    blast-radius is small.
+ *  - passphrase set → the credential is AES-256-GCM-sealed at rest, and content
+ *    E2EE becomes available. The passphrase is held in memory only, never stored.
  */
 export class SyncController {
   private key: CryptoKey | null = null;
-  private secret: string | null = null; // GCS HMAC secret (unsealed)
-  private driveRefresh: string | null = null; // Drive refresh token (unsealed)
+  private gcsSecret: string | null = null; // unsealed HMAC secret
+  private driveRefresh: string | null = null; // unsealed Drive refresh token
   private driveAccess: { token: string; expiresAt: number } | null = null;
-  /** Transient-failure resilient transport shared by all providers. */
   private readonly http: HttpSend = withRetry(requestUrlHttp);
 
   constructor(
@@ -36,44 +38,63 @@ export class SyncController {
     private readonly persist: () => Promise<void>
   ) {}
 
-  get unlocked(): boolean {
-    return this.key !== null;
+  /** A passphrase is required only if E2EE is on or some stored secret is encrypted. */
+  get needsPassphrase(): boolean {
+    return this.settings.e2ee || this.settings.gcsSecret?.enc === true || this.settings.driveToken?.enc === true;
   }
 
-  private async ensureKey(passphrase: string): Promise<CryptoKey> {
-    if (!passphrase) throw new Error("Passphrase required.");
+  /** Ready to sync: the active provider's credential is loaded and E2EE (if on) is unlocked. */
+  get ready(): boolean {
+    const providerOk =
+      this.settings.provider === "drive"
+        ? this.driveRefresh !== null
+        : this.gcsSecret !== null && !!this.settings.accessId;
+    return providerOk && (!this.settings.e2ee || this.key !== null);
+  }
+
+  /**
+   * Load stored secrets into memory. Plaintext secrets always load; encrypted
+   * ones load only when the passphrase is supplied. Call on plugin load (no
+   * passphrase) and again from "Unlock" (with passphrase).
+   */
+  async prepare(passphrase?: string): Promise<void> {
+    if (passphrase && this.settings.salt) {
+      this.key = await deriveAesKey(passphrase, base64Decode(this.settings.salt), PBKDF2_ITERATIONS);
+    }
+    this.gcsSecret = await this.tryLoad(this.settings.gcsSecret);
+    this.driveRefresh = await this.tryLoad(this.settings.driveToken);
+  }
+
+  private async tryLoad(store: StoredSecret | null): Promise<string | null> {
+    if (!store) return null;
+    if (!store.enc) return store.data;
+    if (!this.key) return null; // encrypted but still locked
+    return openSecret(this.key, store.data);
+  }
+
+  private async seal(value: string, passphrase?: string): Promise<StoredSecret> {
+    if (!passphrase) return { enc: false, data: value };
     const salt = this.settings.salt ? base64Decode(this.settings.salt) : newSalt();
     if (!this.settings.salt) this.settings.salt = base64Encode(salt);
     this.key = await deriveAesKey(passphrase, salt, PBKDF2_ITERATIONS);
-    return this.key;
-  }
-
-  /** Re-derive the key from the stored salt and unseal whatever credentials exist. */
-  async unlock(passphrase: string): Promise<void> {
-    if (!this.settings.salt) throw new Error("No saved credentials yet — set up a provider first.");
-    const key = await deriveAesKey(passphrase, base64Decode(this.settings.salt), PBKDF2_ITERATIONS);
-    if (this.settings.sealedSecret) this.secret = await openSecret(key, this.settings.sealedSecret);
-    if (this.settings.sealedRefreshToken) this.driveRefresh = await openSecret(key, this.settings.sealedRefreshToken);
-    this.key = key;
+    return { enc: true, data: await sealSecret(this.key, value) };
   }
 
   lock(): void {
     this.key = null;
-    this.secret = null;
+    this.gcsSecret = null;
     this.driveRefresh = null;
     this.driveAccess = null;
   }
 
-  async saveGcsCredentials(passphrase: string, accessId: string, plaintextSecret: string): Promise<void> {
-    const key = await this.ensureKey(passphrase);
+  async saveGcsCredentials(accessId: string, plaintextSecret: string, passphrase?: string): Promise<void> {
     this.settings.accessId = accessId.trim();
-    this.settings.sealedSecret = await sealSecret(key, plaintextSecret);
-    this.secret = plaintextSecret;
+    this.settings.gcsSecret = await this.seal(plaintextSecret, passphrase);
+    this.gcsSecret = plaintextSecret;
     await this.persist();
   }
 
-  async connectDrive(passphrase: string): Promise<void> {
-    const key = await this.ensureKey(passphrase);
+  async connectDrive(passphrase?: string): Promise<void> {
     if (!this.settings.driveClientId) throw new Error("Enter your Drive OAuth client ID first.");
     const tokens = await driveLoginLoopback({
       clientId: this.settings.driveClientId,
@@ -82,14 +103,20 @@ export class SyncController {
     if (!tokens.refreshToken) {
       throw new Error("No refresh token returned — revoke the app at myaccount.google.com and reconnect.");
     }
-    this.settings.sealedRefreshToken = await sealSecret(key, tokens.refreshToken);
+    this.settings.driveToken = await this.seal(tokens.refreshToken, passphrase);
     this.driveRefresh = tokens.refreshToken;
     this.driveAccess = { token: tokens.accessToken, expiresAt: tokens.expiresAt };
     await this.persist();
   }
 
   async sync(): Promise<SyncReport> {
-    if (!this.unlocked) throw new Error("Locked — enter your passphrase to unlock first.");
+    if (!this.ready) {
+      throw new Error(
+        this.needsPassphrase && !this.key
+          ? "Locked — enter your passphrase to unlock."
+          : "Not configured — connect a provider in settings first."
+      );
+    }
     const engine = new SyncEngine(
       new ObsidianLocalStore(this.app, this.settings.syncFolder),
       this.buildProvider(),
@@ -105,18 +132,16 @@ export class SyncController {
 
   private buildProvider(): RemoteProvider {
     if (this.settings.provider === "drive") {
-      if (!this.driveRefresh && !this.driveAccess) {
-        throw new Error("Connect Google Drive first (unlock, then Connect).");
-      }
+      if (!this.driveRefresh && !this.driveAccess) throw new Error("Connect Google Drive first.");
       return new DriveProvider({ appFolderName: this.settings.appFolderName }, () => this.getDriveToken(), this.http);
     }
-    if (!this.secret || !this.settings.accessId || !this.settings.bucket) {
+    if (!this.gcsSecret || !this.settings.accessId || !this.settings.bucket) {
       throw new Error("Missing GCS bucket / access id / secret.");
     }
     return new GcsProvider(
       { bucket: this.settings.bucket, prefix: this.settings.prefix, endpoint: GCS_ENDPOINT },
       sigv4Authorizer(
-        { accessId: this.settings.accessId, secret: this.secret },
+        { accessId: this.settings.accessId, secret: this.gcsSecret },
         { region: this.settings.region || "auto", service: this.settings.service || "s3" }
       ),
       this.http
@@ -125,7 +150,7 @@ export class SyncController {
 
   private async getDriveToken(): Promise<string> {
     if (this.driveAccess && this.driveAccess.expiresAt > Date.now() + 60_000) return this.driveAccess.token;
-    if (!this.driveRefresh) throw new Error("Connect Google Drive first (and unlock).");
+    if (!this.driveRefresh) throw new Error("Connect Google Drive first.");
     const t = await refreshAccessToken(this.http, { clientId: this.settings.driveClientId, refreshToken: this.driveRefresh }, Date.now());
     this.driveAccess = { token: t.accessToken, expiresAt: t.expiresAt };
     return t.accessToken;
@@ -133,7 +158,7 @@ export class SyncController {
 
   private buildCryptor(): Cryptor {
     if (!this.settings.e2ee) return identityCryptor;
-    if (!this.key) throw new Error("Unlock required for E2EE.");
+    if (!this.key) throw new Error("Unlock (passphrase) required for E2EE.");
     return PassphraseCryptor.fromKey(this.key);
   }
 }

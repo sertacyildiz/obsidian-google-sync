@@ -11,6 +11,7 @@ export default class GoogleSyncPlugin extends Plugin {
   async onload(): Promise<void> {
     await this.loadSettings();
     this.controller = new SyncController(this.app, this.settings, () => this.saveData(this.settings));
+    void this.controller.prepare(); // auto-load plaintext credentials (no passphrase needed unless encrypted / E2EE on)
 
     this.addRibbonIcon("refresh-cw", "Google Cloud Sync: sync now", () => void this.runSync());
     this.addCommand({ id: "sync-now", name: "Sync now", callback: () => void this.runSync() });
@@ -43,7 +44,7 @@ export default class GoogleSyncPlugin extends Plugin {
   }
 
   async runSync(auto = false): Promise<void> {
-    if (auto && !this.controller.unlocked) return; // don't nag while locked
+    if (auto && !this.controller.ready) return; // skip quietly while locked or unconfigured
     if (this.syncing) {
       new Notice("Google Cloud Sync: a sync is already running…");
       return;
@@ -125,7 +126,7 @@ class GoogleSyncSettingTab extends PluginSettingTab {
       );
     new Setting(containerEl)
       .setName("End-to-end encryption")
-      .setDesc("Encrypt content before upload (recommended). Requires your passphrase to be unlocked.")
+      .setDesc("Optional. Encrypts content before upload (zero-knowledge). Requires setting a passphrase below.")
       .addToggle((t) =>
         t.setValue(s.e2ee).onChange(async (v) => {
           s.e2ee = v;
@@ -161,10 +162,12 @@ class GoogleSyncSettingTab extends PluginSettingTab {
       })
     );
 
-    // --- Unlock: shared passphrase (ephemeral, never persisted) ---
-    new Setting(containerEl).setName("Unlock").setHeading();
+    // --- Passphrase (OPTIONAL — only for E2EE or encrypting a stored credential) ---
+    new Setting(containerEl).setName("Passphrase (optional)").setHeading();
     containerEl.createEl("p", {
-      text: "Your passphrase derives the key that unseals stored credentials and powers E2EE. It is never stored.",
+      text:
+        "Leave blank for the simplest setup — credentials are kept in the plugin's own config, which is never synced. " +
+        "Set a passphrase only if you want E2EE or to encrypt the stored credential at rest. It is never saved; enter it once per session to unlock.",
     });
     let passphrase = "";
     new Setting(containerEl).setName("Passphrase").addText((t) => {
@@ -174,8 +177,10 @@ class GoogleSyncSettingTab extends PluginSettingTab {
     new Setting(containerEl).addButton((b) =>
       b.setButtonText("Unlock").onClick(async () => {
         try {
-          await this.plugin.controller.unlock(passphrase);
-          new Notice("Google Cloud Sync: unlocked.");
+          await this.plugin.controller.prepare(passphrase || undefined);
+          new Notice(
+            this.plugin.controller.ready ? "Google Cloud Sync: unlocked." : "Google Cloud Sync: nothing to unlock yet."
+          );
         } catch (e) {
           new Notice(`Google Cloud Sync: ${(e as Error).message}`);
         }
@@ -208,19 +213,19 @@ class GoogleSyncSettingTab extends PluginSettingTab {
       );
     new Setting(containerEl).setName("App folder name").addText((t) =>
       t.setValue(s.appFolderName).onChange(async (v) => {
-        s.appFolderName = v.trim() || "Obsidian (google-sync)";
+        s.appFolderName = v.trim() || "Obsidian (google-cloud-sync)";
         await this.plugin.saveSettings();
       })
     );
     new Setting(containerEl)
-      .setDesc(s.sealedRefreshToken ? "Connected. Re-connect to refresh consent." : "Not connected.")
+      .setDesc(s.driveToken ? "Connected. Re-connect to refresh consent." : "Not connected.")
       .addButton((b) =>
         b
           .setButtonText("Connect Google Drive")
           .setCta()
           .onClick(async () => {
             try {
-              await this.plugin.controller.connectDrive(passphrase);
+              await this.plugin.controller.connectDrive(passphrase || undefined);
               new Notice("Google Cloud Sync: Google Drive connected.");
               this.display();
             } catch (e) {
@@ -275,8 +280,10 @@ class GoogleSyncSettingTab extends PluginSettingTab {
         .setCta()
         .onClick(async () => {
           try {
-            await this.plugin.controller.saveGcsCredentials(passphrase, accessId, secret);
-            new Notice("Google Cloud Sync: GCS credentials sealed + unlocked.");
+            await this.plugin.controller.saveGcsCredentials(accessId, secret, passphrase || undefined);
+            new Notice(
+              passphrase ? "Google Cloud Sync: GCS credentials saved (encrypted)." : "Google Cloud Sync: GCS credentials saved."
+            );
             this.display();
           } catch (e) {
             new Notice(`Google Cloud Sync: ${(e as Error).message}`);

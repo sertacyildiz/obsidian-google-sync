@@ -8,7 +8,7 @@ Sync your Obsidian vault to a **Google backend you own** — **Google Drive** or
 
 - **Your infrastructure, not ours.** No hosted relay and no shared app — you supply your own Google credentials (`drive.file` scope, or a user-account HMAC key for GCS).
 - **End-to-end encryption.** Content is encrypted on your device before upload (AES-256-GCM, key derived from your passphrase via PBKDF2). A leaked credential or bucket never exposes your notes.
-- **Credentials stay safe.** Secrets are encrypted at rest, never written in plaintext, never synced, never logged.
+- **Credentials stay safe.** Secrets are **never synced and never logged**, and OAuth scopes are kept narrow. Encryption of the credential at rest is **optional** (set a passphrase) — see the security note for why.
 - **Two providers, one plugin.** Google Drive (OAuth2 PKCE) and Google Cloud Storage (HMAC + correct SigV4 signing that sidesteps the AWS-SDK incompatibilities most S3-interop tools hit against GCS).
 
 ## Install (beta, via BRAT)
@@ -21,7 +21,7 @@ Sync your Obsidian vault to a **Google backend you own** — **Google Drive** or
 
 ## Setup
 
-Open **Settings → Google Cloud Sync**. Set a **passphrase** (it powers E2EE and unseals your stored credential; it is never saved), choose a **sync folder** (or the whole vault), then configure a provider.
+Open **Settings → Google Cloud Sync**. Choose a **sync folder** (or the whole vault), then configure a provider. A **passphrase is optional** — set one only if you want end-to-end encryption or to encrypt the stored credential at rest; it is never saved.
 
 ### Google Drive
 1. In the [Google Cloud Console](https://console.cloud.google.com/): create a project, enable the **Drive API**, configure the **OAuth consent screen** (add yourself as a test user), and create an **OAuth client ID** of type **Desktop app**.
