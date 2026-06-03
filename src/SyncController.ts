@@ -1,9 +1,10 @@
 import { App } from "obsidian";
 import { GCS_ENDPOINT, GcsProvider } from "./providers/gcs/GcsProvider";
-import { sigv4Authorizer } from "./providers/gcs/auth";
+import { GCS_OAUTH_SCOPE, bearerAuthorizer, sigv4Authorizer } from "./providers/gcs/auth";
 import { DriveProvider } from "./providers/drive/DriveProvider";
-import { driveScope, refreshAccessToken } from "./providers/drive/DriveAuth";
-import { driveLoginLoopback } from "./obsidian/driveLogin";
+import { driveScope } from "./providers/drive/DriveAuth";
+import { refreshAccessToken } from "./providers/google/oauth";
+import { googleLoginLoopback } from "./obsidian/googleLogin";
 import { HttpSend, RemoteProvider } from "./providers/RemoteProvider";
 import { SyncEngine } from "./sync/SyncEngine";
 import { Cryptor, identityCryptor } from "./sync/Cryptor";
@@ -28,19 +29,29 @@ import { base64Decode, base64Encode } from "./util/base64";
 export class SyncController {
   private key: CryptoKey | null = null;
   private gcsSecret: string | null = null; // unsealed HMAC secret
+  private gcsRefresh: string | null = null; // unsealed GCS OAuth refresh token
+  private gcsAccess: { token: string; expiresAt: number } | null = null;
   private driveRefresh: string | null = null; // unsealed Drive refresh token
   private driveAccess: { token: string; expiresAt: number } | null = null;
-  private readonly http: HttpSend = withRetry(requestUrlHttp);
+  private readonly http: HttpSend;
 
   constructor(
     private readonly app: App,
     private readonly settings: GoogleSyncSettings,
-    private readonly persist: () => Promise<void>
-  ) {}
+    private readonly persist: () => Promise<void>,
+    http?: HttpSend
+  ) {
+    this.http = http ?? withRetry(requestUrlHttp);
+  }
 
   /** A passphrase is required only if E2EE is on or some stored secret is encrypted. */
   get needsPassphrase(): boolean {
-    return this.settings.e2ee || this.settings.gcsSecret?.enc === true || this.settings.driveToken?.enc === true;
+    return (
+      this.settings.e2ee ||
+      this.settings.gcsSecret?.enc === true ||
+      this.settings.gcsToken?.enc === true ||
+      this.settings.driveToken?.enc === true
+    );
   }
 
   /** Ready to sync: the active provider's credential is loaded and E2EE (if on) is unlocked. */
@@ -48,7 +59,9 @@ export class SyncController {
     const providerOk =
       this.settings.provider === "drive"
         ? this.driveRefresh !== null
-        : this.gcsSecret !== null && !!this.settings.accessId;
+        : this.settings.gcsAuthMode === "oauth"
+          ? this.gcsRefresh !== null
+          : this.gcsSecret !== null && !!this.settings.accessId;
     return providerOk && (!this.settings.e2ee || this.key !== null);
   }
 
@@ -62,6 +75,7 @@ export class SyncController {
       this.key = await deriveAesKey(passphrase, base64Decode(this.settings.salt), PBKDF2_ITERATIONS);
     }
     this.gcsSecret = await this.tryLoad(this.settings.gcsSecret);
+    this.gcsRefresh = await this.tryLoad(this.settings.gcsToken);
     this.driveRefresh = await this.tryLoad(this.settings.driveToken);
   }
 
@@ -83,6 +97,8 @@ export class SyncController {
   lock(): void {
     this.key = null;
     this.gcsSecret = null;
+    this.gcsRefresh = null;
+    this.gcsAccess = null;
     this.driveRefresh = null;
     this.driveAccess = null;
   }
@@ -95,10 +111,11 @@ export class SyncController {
   }
 
   async connectDrive(passphrase?: string): Promise<void> {
-    if (!this.settings.driveClientId) throw new Error("Enter your Drive OAuth client ID first.");
-    const tokens = await driveLoginLoopback({
-      clientId: this.settings.driveClientId,
+    if (!this.settings.oauthClientId) throw new Error("Enter your Google OAuth client ID first.");
+    const tokens = await googleLoginLoopback({
+      clientId: this.settings.oauthClientId,
       scope: driveScope(this.settings.driveScopeLevel),
+      label: "Google Drive",
     });
     if (!tokens.refreshToken) {
       throw new Error("No refresh token returned — revoke the app at myaccount.google.com and reconnect.");
@@ -106,6 +123,22 @@ export class SyncController {
     this.settings.driveToken = await this.seal(tokens.refreshToken, passphrase);
     this.driveRefresh = tokens.refreshToken;
     this.driveAccess = { token: tokens.accessToken, expiresAt: tokens.expiresAt };
+    await this.persist();
+  }
+
+  async connectGcs(passphrase?: string): Promise<void> {
+    if (!this.settings.oauthClientId) throw new Error("Enter your Google OAuth client ID first.");
+    const tokens = await googleLoginLoopback({
+      clientId: this.settings.oauthClientId,
+      scope: GCS_OAUTH_SCOPE,
+      label: "Google Cloud Storage",
+    });
+    if (!tokens.refreshToken) {
+      throw new Error("No refresh token returned — revoke the app at myaccount.google.com and reconnect.");
+    }
+    this.settings.gcsToken = await this.seal(tokens.refreshToken, passphrase);
+    this.gcsRefresh = tokens.refreshToken;
+    this.gcsAccess = { token: tokens.accessToken, expiresAt: tokens.expiresAt };
     await this.persist();
   }
 
@@ -135,11 +168,15 @@ export class SyncController {
       if (!this.driveRefresh && !this.driveAccess) throw new Error("Connect Google Drive first.");
       return new DriveProvider({ appFolderName: this.settings.appFolderName }, () => this.getDriveToken(), this.http);
     }
-    if (!this.gcsSecret || !this.settings.accessId || !this.settings.bucket) {
-      throw new Error("Missing GCS bucket / access id / secret.");
+    if (!this.settings.bucket) throw new Error("Missing GCS bucket.");
+    const cfg = { bucket: this.settings.bucket, prefix: this.settings.prefix, endpoint: GCS_ENDPOINT };
+    if (this.settings.gcsAuthMode === "oauth") {
+      if (!this.gcsRefresh && !this.gcsAccess) throw new Error("Connect Google Cloud Storage first.");
+      return new GcsProvider(cfg, bearerAuthorizer(() => this.getGcsToken()), this.http);
     }
+    if (!this.gcsSecret || !this.settings.accessId) throw new Error("Missing GCS HMAC access id / secret.");
     return new GcsProvider(
-      { bucket: this.settings.bucket, prefix: this.settings.prefix, endpoint: GCS_ENDPOINT },
+      cfg,
       sigv4Authorizer(
         { accessId: this.settings.accessId, secret: this.gcsSecret },
         { region: this.settings.region || "auto", service: this.settings.service || "s3" }
@@ -151,8 +188,16 @@ export class SyncController {
   private async getDriveToken(): Promise<string> {
     if (this.driveAccess && this.driveAccess.expiresAt > Date.now() + 60_000) return this.driveAccess.token;
     if (!this.driveRefresh) throw new Error("Connect Google Drive first.");
-    const t = await refreshAccessToken(this.http, { clientId: this.settings.driveClientId, refreshToken: this.driveRefresh }, Date.now());
+    const t = await refreshAccessToken(this.http, { clientId: this.settings.oauthClientId, refreshToken: this.driveRefresh }, Date.now());
     this.driveAccess = { token: t.accessToken, expiresAt: t.expiresAt };
+    return t.accessToken;
+  }
+
+  private async getGcsToken(): Promise<string> {
+    if (this.gcsAccess && this.gcsAccess.expiresAt > Date.now() + 60_000) return this.gcsAccess.token;
+    if (!this.gcsRefresh) throw new Error("Connect Google Cloud Storage first.");
+    const t = await refreshAccessToken(this.http, { clientId: this.settings.oauthClientId, refreshToken: this.gcsRefresh }, Date.now());
+    this.gcsAccess = { token: t.accessToken, expiresAt: t.expiresAt };
     return t.accessToken;
   }
 

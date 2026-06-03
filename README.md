@@ -6,7 +6,7 @@ Sync your Obsidian vault to a **Google backend you own** — **Google Drive** or
 
 ## Why
 
-- **Your infrastructure, not ours.** No hosted relay and no shared app — you supply your own Google credentials (`drive.file` scope, or a user-account HMAC key for GCS).
+- **Your infrastructure, not ours.** No hosted relay and no shared app — you supply your own Google credentials (`drive.file` scope for Drive; an HMAC key or your own OAuth client for GCS).
 - **End-to-end encryption.** Content is encrypted on your device before upload (AES-256-GCM, key derived from your passphrase via PBKDF2). A leaked credential or bucket never exposes your notes.
 - **Credentials stay safe.** Secrets are **never synced and never logged**, and OAuth scopes are kept narrow. Encryption of the credential at rest is **optional** (set a passphrase) — see the security note for why.
 - **Two providers, one plugin.** Google Drive (OAuth2 PKCE) and Google Cloud Storage (HMAC + correct SigV4 signing that sidesteps the AWS-SDK incompatibilities most S3-interop tools hit against GCS).
@@ -28,9 +28,11 @@ Open **Settings → Google Cloud Sync**. Choose a **sync folder** (or the whole 
 2. Paste the **client ID**, choose a scope (**App files** = `drive.file`, recommended; or **Full Drive**), then **Connect Google Drive** and approve in your browser.
 
 ### Google Cloud Storage
-1. Create a bucket (uniform bucket-level access; public access prevented).
-2. Console → *Cloud Storage → Settings → Interoperability* → create a **user-account HMAC key**.
-3. Paste the **bucket**, **Access ID**, and **Secret**, then **Save GCS credentials**.
+
+Create a bucket first (uniform bucket-level access; public access prevented), then pick an **Auth method**:
+
+- **HMAC key — recommended (least privilege).** Console → *Cloud Storage → Settings → Interoperability* → create an **HMAC key** (ideally for a service account scoped to just this bucket). Paste the **bucket**, **Access ID**, and **Secret**, then **Save GCS credentials**.
+- **OAuth — convenience.** Reuse the shared **OAuth client ID** (the same Desktop client as Drive; enable the *Cloud Storage* API on its project), paste the **bucket**, then **Connect Google Cloud Storage** and approve in your browser. ⚠️ **GCS has no per-bucket OAuth scope:** the granted token (`devstorage.read_write`) can read/write **every** bucket your Google account can reach. For least privilege prefer HMAC, or connect with a Google account / project that can only reach this one bucket.
 
 Then **Sync now** (ribbon icon or command palette). Optionally enable **auto-sync** — on every change, or every N minutes.
 
@@ -52,7 +54,7 @@ npm install
 npm run build   # type-checks, then bundles to main.js
 ```
 
-Copy `main.js`, `manifest.json`, and `styles.css` into `<vault>/.obsidian/plugins/google-sync/`.
+Copy `main.js`, `manifest.json`, and `styles.css` into `<vault>/.obsidian/plugins/google-cloud-sync/`.
 
 ## License
 

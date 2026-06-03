@@ -1,6 +1,16 @@
 import { signRequest, Sigv4Credentials, Sigv4Options } from "./sigv4";
 
 /**
+ * OAuth scope for the GCS "Connect" path: object read/write/delete/list, the
+ * least privilege that still syncs. Deliberately NOT `full_control` (ACL/bucket
+ * admin) or `cloud-platform` (everything). NOTE: GCS OAuth scopes are
+ * account-wide — there is no per-bucket OAuth scope — so a leaked token can
+ * reach every bucket the account can. HMAC stays the recommended least-privilege
+ * GCS path; the UI says so. See THREAT-MODEL.md.
+ */
+export const GCS_OAUTH_SCOPE = "https://www.googleapis.com/auth/devstorage.read_write";
+
+/**
  * Produces the headers (including Authorization) to send for a GCS XML-API
  * request. The GCS XML API accepts two auth schemes; we model both as
  * authorizers so the provider's request/response code is auth-agnostic:

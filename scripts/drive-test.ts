@@ -5,8 +5,9 @@
  * need the Obsidian runtime + an OAuth client and are verified there.
  * Run: sh scripts/run-pilot.sh scripts/drive-test.ts
  */
-import { codeChallengeS256, generateCodeVerifier } from "../src/providers/drive/pkce";
-import { buildAuthUrl, driveScope } from "../src/providers/drive/DriveAuth";
+import { codeChallengeS256, generateCodeVerifier } from "../src/providers/google/pkce";
+import { buildAuthUrl } from "../src/providers/google/oauth";
+import { driveScope } from "../src/providers/drive/DriveAuth";
 import { escapeDriveQuery, parseDriveList } from "../src/providers/drive/DriveProvider";
 
 let passed = 0, failed = 0;

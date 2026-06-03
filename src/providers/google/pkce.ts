@@ -1,7 +1,7 @@
 /**
- * OAuth2 PKCE (RFC 7636) helpers — Web Crypto only. Used for the Google Drive
- * installed-app flow: no client secret is needed, so nothing confidential ships
- * in the plugin.
+ * OAuth2 PKCE (RFC 7636) helpers — Web Crypto only. Used by the Google
+ * installed-app flow (Drive + GCS): no client secret is needed, so nothing
+ * confidential ships in the plugin.
  */
 function base64url(buf: ArrayBuffer): string {
   const bytes = new Uint8Array(buf);

@@ -1,11 +1,11 @@
-import { TokenSet, buildAuthUrl, exchangeCode } from "../providers/drive/DriveAuth";
-import { codeChallengeS256, generateCodeVerifier } from "../providers/drive/pkce";
+import { TokenSet, buildAuthUrl, exchangeCode } from "../providers/google/oauth";
+import { codeChallengeS256, generateCodeVerifier } from "../providers/google/pkce";
 import { requestUrlHttp } from "./requestUrlHttp";
 
 /** Access Node/Electron via Obsidian's renderer `require` (desktop only). */
 function nodeRequire(mod: string): any {
   const req = (window as unknown as { require?: (m: string) => any }).require;
-  if (!req) throw new Error("Node require unavailable — Drive login is desktop-only.");
+  if (!req) throw new Error("Node require unavailable — Google login is desktop-only.");
   return req(mod);
 }
 
@@ -25,9 +25,11 @@ function openExternal(url: string): void {
 /**
  * Installed-app OAuth via a 127.0.0.1 loopback (PKCE, no client secret, no
  * third-party server). Opens the system browser, captures the redirect on a
- * throwaway local port, and exchanges the code for tokens. Desktop only.
+ * throwaway local port, and exchanges the code for tokens. Provider-neutral:
+ * the caller supplies the scope and a human label (Drive / Cloud Storage) used
+ * in the success page and error text. Desktop only.
  */
-export function driveLoginLoopback(opts: { clientId: string; scope: string }): Promise<TokenSet> {
+export function googleLoginLoopback(opts: { clientId: string; scope: string; label: string }): Promise<TokenSet> {
   const http = nodeRequire("http");
   return new Promise<TokenSet>((resolve, reject) => {
     let settled = false;
@@ -49,7 +51,7 @@ export function driveLoginLoopback(opts: { clientId: string; scope: string }): P
         return;
       }
       res.writeHead(200, { "content-type": "text/html" });
-      res.end("<html><body><h3>Google Drive connected — you can close this tab.</h3></body></html>");
+      res.end(`<html><body><h3>${opts.label} connected — you can close this tab.</h3></body></html>`);
       const port = server.address()?.port;
       server.close();
       if (err || !code) {
@@ -75,7 +77,7 @@ export function driveLoginLoopback(opts: { clientId: string; scope: string }): P
       } catch {
         /* ignore */
       }
-      finish(() => reject(new Error("Drive login timed out (5 min).")));
+      finish(() => reject(new Error(`${opts.label} login timed out (5 min).`)));
     }, 5 * 60_000);
     if (typeof timer === "object" && "unref" in timer) (timer as { unref: () => void }).unref();
 

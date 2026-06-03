@@ -78,6 +78,17 @@ async function main(): Promise<void> {
   }
   check("settings tab display() builds the full UI without throwing", displayOk);
 
+  let displayOauthOk = true;
+  try {
+    plugin.settings.gcsAuthMode = "oauth";
+    plugin._settingTabs[0].display();
+    plugin.settings.gcsAuthMode = "hmac";
+  } catch (e) {
+    displayOauthOk = false;
+    console.log("    oauth display threw:", (e as Error).message);
+  }
+  check("settings tab display() builds the GCS OAuth branch without throwing", displayOauthOk);
+
   // ---- credentials: passphrase is OPTIONAL ----
   plugin.settings.provider = "gcs";
 

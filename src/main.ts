@@ -81,7 +81,10 @@ export default class GoogleSyncPlugin extends Plugin {
   }
 
   async loadSettings(): Promise<void> {
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    const data = (await this.loadData()) as (Partial<GoogleSyncSettings> & { driveClientId?: string }) | null;
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, data);
+    // Back-compat: the pre-0.3 Drive-only `driveClientId` became the shared `oauthClientId`.
+    if (!this.settings.oauthClientId && data?.driveClientId) this.settings.oauthClientId = data.driveClientId;
   }
 
   async saveSettings(): Promise<void> {
@@ -187,17 +190,20 @@ class GoogleSyncSettingTab extends PluginSettingTab {
       })
     );
 
-    // --- Google Drive ---
-    new Setting(containerEl).setName("Google Drive").setHeading();
+    // --- Shared OAuth client (used by both "Connect" buttons) ---
+    new Setting(containerEl).setName("Google OAuth (shared client)").setHeading();
     new Setting(containerEl)
       .setName("OAuth client ID")
-      .setDesc("Your own Desktop OAuth client (Google Cloud Console → Credentials). Public; PKCE, no secret.")
+      .setDesc("Your own Desktop OAuth client (Google Cloud Console → Credentials). Public; PKCE, no secret. Used by both 'Connect' buttons below.")
       .addText((t) =>
-        t.setValue(s.driveClientId).onChange(async (v) => {
-          s.driveClientId = v.trim();
+        t.setValue(s.oauthClientId).onChange(async (v) => {
+          s.oauthClientId = v.trim();
           await this.plugin.saveSettings();
         })
       );
+
+    // --- Google Drive ---
+    new Setting(containerEl).setName("Google Drive").setHeading();
     new Setting(containerEl)
       .setName("Scope")
       .setDesc("'App files' (drive.file) is least-privilege and needs no Google verification. 'Full Drive' can sync existing folders.")
@@ -236,6 +242,20 @@ class GoogleSyncSettingTab extends PluginSettingTab {
 
     // --- Google Cloud Storage ---
     new Setting(containerEl).setName("Google Cloud Storage").setHeading();
+    new Setting(containerEl)
+      .setName("Auth method")
+      .setDesc("HMAC is the recommended least-privilege path. OAuth is one-click but its token can reach every bucket your Google account can access.")
+      .addDropdown((d) =>
+        d
+          .addOption("hmac", "HMAC key (recommended)")
+          .addOption("oauth", "OAuth (convenience)")
+          .setValue(s.gcsAuthMode)
+          .onChange(async (v) => {
+            s.gcsAuthMode = v as GoogleSyncSettings["gcsAuthMode"];
+            await this.plugin.saveSettings();
+            this.display();
+          })
+      );
     new Setting(containerEl).setName("Bucket").addText((t) =>
       t.setValue(s.bucket).onChange(async (v) => {
         s.bucket = v.trim();
@@ -251,44 +271,69 @@ class GoogleSyncSettingTab extends PluginSettingTab {
           await this.plugin.saveSettings();
         })
       );
-    new Setting(containerEl)
-      .setName("Region / service")
-      .setDesc("SigV4 credential scope. Defaults: auto / s3.")
-      .addText((t) =>
-        t.setPlaceholder("auto").setValue(s.region).onChange(async (v) => {
-          s.region = v.trim();
-          await this.plugin.saveSettings();
-        })
-      )
-      .addText((t) =>
-        t.setPlaceholder("s3").setValue(s.service).onChange(async (v) => {
-          s.service = v.trim();
-          await this.plugin.saveSettings();
-        })
-      );
 
-    let accessId = s.accessId;
-    let secret = "";
-    new Setting(containerEl).setName("HMAC Access ID").addText((t) => t.setValue(accessId).onChange((v) => (accessId = v)));
-    new Setting(containerEl).setName("HMAC Secret").addText((t) => {
-      t.inputEl.type = "password";
-      t.onChange((v) => (secret = v));
-    });
-    new Setting(containerEl).addButton((b) =>
-      b
-        .setButtonText("Save GCS credentials")
-        .setCta()
-        .onClick(async () => {
-          try {
-            await this.plugin.controller.saveGcsCredentials(accessId, secret, passphrase || undefined);
-            new Notice(
-              passphrase ? "Google Cloud Sync: GCS credentials saved (encrypted)." : "Google Cloud Sync: GCS credentials saved."
-            );
-            this.display();
-          } catch (e) {
-            new Notice(`Google Cloud Sync: ${(e as Error).message}`);
-          }
-        })
-    );
+    if (s.gcsAuthMode === "oauth") {
+      containerEl.createEl("p", {
+        text:
+          "OAuth grants read/write to every Cloud Storage bucket your Google account can access — GCS has no per-bucket OAuth scope. " +
+          "For least privilege, use HMAC above, or connect with a Google account / project that can only reach this one bucket.",
+      });
+      new Setting(containerEl)
+        .setDesc(s.gcsToken ? "Connected. Re-connect to refresh consent." : "Not connected.")
+        .addButton((b) =>
+          b
+            .setButtonText("Connect Google Cloud Storage")
+            .setCta()
+            .onClick(async () => {
+              try {
+                await this.plugin.controller.connectGcs(passphrase || undefined);
+                new Notice("Google Cloud Sync: Google Cloud Storage connected.");
+                this.display();
+              } catch (e) {
+                new Notice(`Google Cloud Sync: ${(e as Error).message}`);
+              }
+            })
+        );
+    } else {
+      new Setting(containerEl)
+        .setName("Region / service")
+        .setDesc("SigV4 credential scope. Defaults: auto / s3.")
+        .addText((t) =>
+          t.setPlaceholder("auto").setValue(s.region).onChange(async (v) => {
+            s.region = v.trim();
+            await this.plugin.saveSettings();
+          })
+        )
+        .addText((t) =>
+          t.setPlaceholder("s3").setValue(s.service).onChange(async (v) => {
+            s.service = v.trim();
+            await this.plugin.saveSettings();
+          })
+        );
+
+      let accessId = s.accessId;
+      let secret = "";
+      new Setting(containerEl).setName("HMAC Access ID").addText((t) => t.setValue(accessId).onChange((v) => (accessId = v)));
+      new Setting(containerEl).setName("HMAC Secret").addText((t) => {
+        t.inputEl.type = "password";
+        t.onChange((v) => (secret = v));
+      });
+      new Setting(containerEl).addButton((b) =>
+        b
+          .setButtonText("Save GCS credentials")
+          .setCta()
+          .onClick(async () => {
+            try {
+              await this.plugin.controller.saveGcsCredentials(accessId, secret, passphrase || undefined);
+              new Notice(
+                passphrase ? "Google Cloud Sync: GCS credentials saved (encrypted)." : "Google Cloud Sync: GCS credentials saved."
+              );
+              this.display();
+            } catch (e) {
+              new Notice(`Google Cloud Sync: ${(e as Error).message}`);
+            }
+          })
+      );
+    }
   }
 }
