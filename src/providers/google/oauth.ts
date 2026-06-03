@@ -4,8 +4,10 @@ import { HttpSend } from "../RemoteProvider";
  * Provider-neutral Google OAuth 2.0 primitives (installed-app / PKCE). Shared by
  * the Drive and GCS "Connect" flows — neither the auth-URL builder nor the token
  * exchange/refresh is provider-specific; only the requested *scope* differs, and
- * scopes live with their provider (`driveScope`, `gcsOAuthScope`). No client
- * secret is used (PKCE), so nothing confidential ships in the plugin.
+ * scopes live with their provider (`driveScope`, `gcsOAuthScope`). A client
+ * secret is sent only when the OAuth client requires one at token exchange
+ * (Google's "Web"/"Desktop" clients do, even with PKCE); for an installed
+ * (Desktop) app Google treats that secret as non-confidential.
  */
 const AUTH_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
@@ -17,6 +19,14 @@ const TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
  * under "Advanced".
  */
 export const BUILTIN_OAUTH_CLIENT_ID = "941838331259-g9ib1fukco8eqntbqagdqo8jsp2ha7l6.apps.googleusercontent.com";
+
+/**
+ * Optional client secret for the built-in client. Google's "Desktop"/"Web" OAuth
+ * clients require a secret at token exchange even with PKCE; for an installed
+ * (Desktop) app the secret is non-confidential, so shipping it is acceptable.
+ * Empty for client types that don't need it; only sent when non-empty.
+ */
+export const BUILTIN_OAUTH_CLIENT_SECRET = "";
 
 export interface TokenSet {
   accessToken: string;
@@ -69,13 +79,14 @@ async function postToken(http: HttpSend, params: Record<string, string>, now: nu
 
 export function exchangeCode(
   http: HttpSend,
-  p: { clientId: string; code: string; codeVerifier: string; redirectUri: string },
+  p: { clientId: string; clientSecret?: string; code: string; codeVerifier: string; redirectUri: string },
   now: number
 ): Promise<TokenSet> {
   return postToken(
     http,
     {
       client_id: p.clientId,
+      ...(p.clientSecret ? { client_secret: p.clientSecret } : {}),
       code: p.code,
       code_verifier: p.codeVerifier,
       redirect_uri: p.redirectUri,
@@ -87,12 +98,17 @@ export function exchangeCode(
 
 export async function refreshAccessToken(
   http: HttpSend,
-  p: { clientId: string; refreshToken: string },
+  p: { clientId: string; clientSecret?: string; refreshToken: string },
   now: number
 ): Promise<TokenSet> {
   const t = await postToken(
     http,
-    { client_id: p.clientId, refresh_token: p.refreshToken, grant_type: "refresh_token" },
+    {
+      client_id: p.clientId,
+      ...(p.clientSecret ? { client_secret: p.clientSecret } : {}),
+      refresh_token: p.refreshToken,
+      grant_type: "refresh_token",
+    },
     now
   );
   // Google omits refresh_token on refresh — keep the existing one.

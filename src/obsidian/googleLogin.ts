@@ -23,13 +23,14 @@ function openExternal(url: string): void {
 }
 
 /**
- * Installed-app OAuth via a 127.0.0.1 loopback (PKCE, no client secret, no
- * third-party server). Opens the system browser, captures the redirect on a
- * throwaway local port, and exchanges the code for tokens. Provider-neutral:
- * the caller supplies the scope and a human label (Drive / Cloud Storage) used
- * in the success page and error text. Desktop only.
+ * Installed-app OAuth via a 127.0.0.1 loopback (PKCE, no third-party server).
+ * Opens the system browser, captures the redirect on a throwaway local port,
+ * and exchanges the code for tokens. A clientSecret is forwarded only if the
+ * client requires one. Provider-neutral: the caller supplies the scope and a
+ * human label (Drive / Cloud Storage) used in the success page and error text.
+ * Desktop only.
  */
-export function googleLoginLoopback(opts: { clientId: string; scope: string; label: string }): Promise<TokenSet> {
+export function googleLoginLoopback(opts: { clientId: string; clientSecret?: string; scope: string; label: string }): Promise<TokenSet> {
   const http = nodeRequire("http");
   return new Promise<TokenSet>((resolve, reject) => {
     let settled = false;
@@ -50,8 +51,8 @@ export function googleLoginLoopback(opts: { clientId: string; scope: string; lab
         res.end();
         return;
       }
-      res.writeHead(200, { "content-type": "text/html" });
-      res.end(`<html><body><h3>${opts.label} connected — you can close this tab.</h3></body></html>`);
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(`<!doctype html><html><head><meta charset="utf-8"></head><body><h3>${opts.label} connected — you can close this tab.</h3></body></html>`);
       const port = server.address()?.port;
       server.close();
       if (err || !code) {
@@ -60,7 +61,7 @@ export function googleLoginLoopback(opts: { clientId: string; scope: string; lab
       }
       exchangeCode(
         requestUrlHttp,
-        { clientId: opts.clientId, code, codeVerifier: verifier, redirectUri: `http://127.0.0.1:${port}` },
+        { clientId: opts.clientId, clientSecret: opts.clientSecret, code, codeVerifier: verifier, redirectUri: `http://127.0.0.1:${port}` },
         Date.now()
       ).then(
         (tokens) => finish(() => resolve(tokens)),

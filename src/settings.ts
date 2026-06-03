@@ -33,8 +33,9 @@ export interface GoogleSyncSettings {
   gcsSecret: StoredSecret | null; // HMAC secret
   gcsToken: StoredSecret | null; // OAuth refresh token
 
-  // --- shared OAuth client (public; PKCE). Empty → use the built-in client. ---
+  // --- shared OAuth client. Empty → built-in client. Secret sent only if the client needs one (Desktop/Web). ---
   oauthClientId: string;
+  oauthClientSecret: string;
 
   // --- sync behaviour ---
   syncFolder: string; // "" = whole vault
@@ -67,6 +68,7 @@ export const DEFAULT_SETTINGS: GoogleSyncSettings = {
   gcsToken: null,
 
   oauthClientId: "",
+  oauthClientSecret: "",
 
   syncFolder: "",
   autoSync: false,

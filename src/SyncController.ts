@@ -3,7 +3,7 @@ import { GCS_ENDPOINT, GcsProvider } from "./providers/gcs/GcsProvider";
 import { GCS_OAUTH_SCOPE, bearerAuthorizer, sigv4Authorizer } from "./providers/gcs/auth";
 import { DriveProvider } from "./providers/drive/DriveProvider";
 import { driveScope } from "./providers/drive/DriveAuth";
-import { BUILTIN_OAUTH_CLIENT_ID, TokenSet, refreshAccessToken } from "./providers/google/oauth";
+import { BUILTIN_OAUTH_CLIENT_ID, BUILTIN_OAUTH_CLIENT_SECRET, TokenSet, refreshAccessToken } from "./providers/google/oauth";
 import { googleLoginLoopback } from "./obsidian/googleLogin";
 import { HttpSend, RemoteProvider } from "./providers/RemoteProvider";
 import { SyncEngine } from "./sync/SyncEngine";
@@ -50,6 +50,11 @@ export class SyncController {
   /** The OAuth client id to use: the user's own (Advanced) or the built-in one. */
   private clientId(): string {
     return this.settings.oauthClientId || BUILTIN_OAUTH_CLIENT_ID;
+  }
+
+  /** The OAuth client secret to send, if the client requires one ("" = none / PKCE-only). */
+  private clientSecret(): string {
+    return this.settings.oauthClientSecret || BUILTIN_OAUTH_CLIENT_SECRET;
   }
 
   /** A passphrase is needed only for E2EE or to open a legacy encrypted credential. */
@@ -174,7 +179,7 @@ export class SyncController {
         "One-click sign-in isn't set up in this build yet — add your own OAuth Client ID under Advanced."
       );
     }
-    const tokens = await googleLoginLoopback({ clientId: this.clientId(), scope, label });
+    const tokens = await googleLoginLoopback({ clientId: this.clientId(), clientSecret: this.clientSecret(), scope, label });
     if (!tokens.refreshToken) {
       throw new Error("No refresh token returned — revoke the app at myaccount.google.com and reconnect.");
     }
@@ -245,7 +250,7 @@ export class SyncController {
   private async getDriveToken(): Promise<string> {
     if (this.driveAccess && this.driveAccess.expiresAt > Date.now() + 60_000) return this.driveAccess.token;
     if (!this.driveRefresh) throw new Error("Connect Google Drive first.");
-    const t = await refreshAccessToken(this.http, { clientId: this.clientId(), refreshToken: this.driveRefresh }, Date.now());
+    const t = await refreshAccessToken(this.http, { clientId: this.clientId(), clientSecret: this.clientSecret(), refreshToken: this.driveRefresh }, Date.now());
     this.driveAccess = { token: t.accessToken, expiresAt: t.expiresAt };
     return t.accessToken;
   }
@@ -253,7 +258,7 @@ export class SyncController {
   private async getGcsToken(): Promise<string> {
     if (this.gcsAccess && this.gcsAccess.expiresAt > Date.now() + 60_000) return this.gcsAccess.token;
     if (!this.gcsRefresh) throw new Error("Connect Google Cloud Storage first.");
-    const t = await refreshAccessToken(this.http, { clientId: this.clientId(), refreshToken: this.gcsRefresh }, Date.now());
+    const t = await refreshAccessToken(this.http, { clientId: this.clientId(), clientSecret: this.clientSecret(), refreshToken: this.gcsRefresh }, Date.now());
     this.gcsAccess = { token: t.accessToken, expiresAt: t.expiresAt };
     return t.accessToken;
   }

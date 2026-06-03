@@ -190,13 +190,23 @@ class GoogleSyncSettingTab extends PluginSettingTab {
         );
       new Setting(dadv)
         .setName("OAuth client ID (optional)")
-        .setDesc("Use your own Google OAuth client instead of the built-in one. Public; PKCE, no secret.")
+        .setDesc("Use your own Google OAuth client instead of the built-in one.")
         .addText((t) =>
           t.setValue(s.oauthClientId).onChange(async (v) => {
             s.oauthClientId = v.trim();
             await this.plugin.saveSettings();
           })
         );
+      new Setting(dadv)
+        .setName("OAuth client secret (optional)")
+        .setDesc("Only if your OAuth client requires one (Google 'Desktop'/'Web' clients do). For a Desktop app it is non-confidential.")
+        .addText((t) => {
+          t.inputEl.type = "password";
+          t.setValue(s.oauthClientSecret).onChange(async (v) => {
+            s.oauthClientSecret = v.trim();
+            await this.plugin.saveSettings();
+          });
+        });
     }
 
     // ---------------- Google Cloud Storage ----------------
@@ -284,6 +294,16 @@ class GoogleSyncSettingTab extends PluginSettingTab {
             await this.plugin.saveSettings();
           })
         );
+      new Setting(gadv)
+        .setName("OAuth client secret (optional)")
+        .setDesc("Only if your OAuth client requires one. For a Desktop app it is non-confidential.")
+        .addText((t) => {
+          t.inputEl.type = "password";
+          t.setValue(s.oauthClientSecret).onChange(async (v) => {
+            s.oauthClientSecret = v.trim();
+            await this.plugin.saveSettings();
+          });
+        });
     }
 
     // ---------------- Sync behaviour ----------------
