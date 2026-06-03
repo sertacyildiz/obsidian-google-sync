@@ -221,6 +221,7 @@ export class SyncController {
       const stateKey = `${id}${id === "drive" ? "/mirror" : ""}/${this.remoteRoot(id)}`;
       const { state, report } = await engine.sync(this.settings.syncState[stateKey] ?? {});
       this.settings.syncState[stateKey] = state;
+      this.settings.backendLastSync[id] = Date.now(); // info only (settings display)
       merged.uploaded.push(...report.uploaded);
       merged.downloaded.push(...report.downloaded);
       merged.deletedLocal.push(...report.deletedLocal);

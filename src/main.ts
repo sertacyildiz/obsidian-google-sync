@@ -1,6 +1,7 @@
 import { App, Notice, Plugin, PluginSettingTab, Setting, debounce } from "obsidian";
 import { DEFAULT_APP_FOLDER, DEFAULT_SETTINGS, GoogleSyncSettings } from "./settings";
 import { SyncController } from "./SyncController";
+import { relativeTime } from "./util/time";
 
 export default class GoogleSyncPlugin extends Plugin {
   settings: GoogleSyncSettings = DEFAULT_SETTINGS;
@@ -90,6 +91,7 @@ export default class GoogleSyncPlugin extends Plugin {
       | null;
     this.settings = Object.assign({}, DEFAULT_SETTINGS, data);
     if (!this.settings.syncState) this.settings.syncState = {};
+    this.settings.backendLastSync = { ...(this.settings.backendLastSync || {}) }; // fresh object (don't share the default)
     if (data) {
       // Migrations from the pre-0.4 single-provider model:
       if (!this.settings.oauthClientId && data.driveClientId) this.settings.oauthClientId = data.driveClientId;
@@ -163,7 +165,11 @@ class GoogleSyncSettingTab extends PluginSettingTab {
             })
         );
       const drow = new Setting(containerEl)
-        .setDesc(s.driveToken ? "✓ Connected." : "Not connected.")
+        .setDesc(
+          s.driveToken
+            ? `✓ Connected.${s.backendLastSync.drive ? ` Last synced ${relativeTime(s.backendLastSync.drive, Date.now())}.` : ""}`
+            : "Not connected."
+        )
         .addButton((b) => b.setButtonText(s.driveToken ? "Reconnect" : "Connect Google Drive").setCta().onClick(() => this.connect("drive")));
       if (s.driveToken)
         drow.addButton((b) =>
@@ -242,7 +248,8 @@ class GoogleSyncSettingTab extends PluginSettingTab {
           await this.plugin.saveSettings();
         })
       );
-      const gstatus = s.gcsToken ? "✓ Connected (OAuth)." : s.gcsSecret ? "✓ Using an HMAC key." : "Not connected.";
+      const gbase = s.gcsToken ? "✓ Connected (OAuth)." : s.gcsSecret ? "✓ Using an HMAC key." : "Not connected.";
+      const gstatus = (s.gcsToken || s.gcsSecret) && s.backendLastSync.gcs ? `${gbase} Last synced ${relativeTime(s.backendLastSync.gcs, Date.now())}.` : gbase;
       const grow = new Setting(containerEl)
         .setDesc(gstatus)
         .addButton((b) => b.setButtonText(s.gcsToken ? "Reconnect" : "Connect Google Cloud").setCta().onClick(() => this.connect("gcs")));
@@ -328,7 +335,7 @@ class GoogleSyncSettingTab extends PluginSettingTab {
     new Setting(containerEl).setName("Sync").setHeading();
     new Setting(containerEl)
       .setName("Sync now")
-      .setDesc(`Last synced: ${s.lastSyncAt ? new Date(s.lastSyncAt).toLocaleString() : "never"}`)
+      .setDesc(`Last synced: ${s.lastSyncAt ? `${relativeTime(s.lastSyncAt, Date.now())} (${new Date(s.lastSyncAt).toLocaleString()})` : "never"}`)
       .addButton((b) =>
         b
           .setButtonText("Sync now")
