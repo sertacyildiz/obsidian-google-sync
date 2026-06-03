@@ -133,7 +133,7 @@ export class SyncController {
     this.settings.driveToken = null;
     this.driveRefresh = null;
     this.driveAccess = null;
-    delete this.settings.syncState.drive;
+    for (const k of Object.keys(this.settings.syncState)) if (k.startsWith("drive/")) delete this.settings.syncState[k];
     return this.persist();
   }
 
@@ -144,7 +144,7 @@ export class SyncController {
     this.gcsRefresh = null;
     this.gcsAccess = null;
     this.gcsSecret = null;
-    delete this.settings.syncState.gcs;
+    for (const k of Object.keys(this.settings.syncState)) if (k.startsWith("gcs/")) delete this.settings.syncState[k];
     return this.persist();
   }
 
@@ -212,8 +212,9 @@ export class SyncController {
         () => new Date(),
         this.settings.syncFolder
       );
-      const { state, report } = await engine.sync(this.settings.syncState[id] ?? {});
-      this.settings.syncState[id] = state;
+      const stateKey = `${id}/${this.remoteRoot(id)}`;
+      const { state, report } = await engine.sync(this.settings.syncState[stateKey] ?? {});
+      this.settings.syncState[stateKey] = state;
       merged.uploaded.push(...report.uploaded);
       merged.downloaded.push(...report.downloaded);
       merged.deletedLocal.push(...report.deletedLocal);
@@ -226,20 +227,25 @@ export class SyncController {
     return merged;
   }
 
-  private buildProvider(id: BackendId): RemoteProvider {
-    // Each vault syncs under its own name so multiple vaults never collide:
-    // Drive → <base folder>/<vault>; GCS → <prefix>/<vault>.
+  /**
+   * The effective remote root for a backend — always ending with the vault name
+   * so multiple vaults never collide (Drive: <base folder>/<vault>; GCS:
+   * <prefix>/<vault>). The sync baseline is keyed by this, so if it changes
+   * (vault rename, folder/prefix change) the next sync starts fresh and UPLOADS,
+   * instead of seeing an empty new location as "everything was deleted" and
+   * wiping the local vault.
+   */
+  private remoteRoot(id: BackendId): string {
     const vault = this.app.vault.getName().trim();
+    if (id === "drive") return `${this.settings.appFolderName || DEFAULT_APP_FOLDER}/${vault}`;
+    return [this.settings.prefix.replace(/^\/+|\/+$/g, ""), vault].filter(Boolean).join("/");
+  }
+
+  private buildProvider(id: BackendId): RemoteProvider {
     if (id === "drive") {
-      const base = this.settings.appFolderName || DEFAULT_APP_FOLDER;
-      return new DriveProvider(
-        { appFolderName: `${base}/${vault}` },
-        () => this.getDriveToken(),
-        this.http
-      );
+      return new DriveProvider({ appFolderName: this.remoteRoot("drive") }, () => this.getDriveToken(), this.http);
     }
-    const prefix = [this.settings.prefix.replace(/^\/+|\/+$/g, ""), vault].filter(Boolean).join("/");
-    const cfg = { bucket: this.settings.bucket, prefix, endpoint: GCS_ENDPOINT };
+    const cfg = { bucket: this.settings.bucket, prefix: this.remoteRoot("gcs"), endpoint: GCS_ENDPOINT };
     if (this.settings.gcsAuthMode === "oauth") {
       return new GcsProvider(cfg, bearerAuthorizer(() => this.getGcsToken()), this.http);
     }

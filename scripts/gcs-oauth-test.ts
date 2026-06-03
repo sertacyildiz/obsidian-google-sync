@@ -161,8 +161,9 @@ async function main(): Promise<void> {
       record.some((r) => r.url.includes("googleapis.com/drive")) && record.some((r) => r.url.includes("storage.googleapis.com"))
     );
     check(
-      "each backend keeps its own baseline (syncState has drive + gcs)",
-      "drive" in settings.syncState && "gcs" in settings.syncState
+      "each backend keeps its own baseline, keyed per remote-root (migration-safe)",
+      Object.keys(settings.syncState).some((k) => k.startsWith("drive/")) &&
+        Object.keys(settings.syncState).some((k) => k.startsWith("gcs/"))
     );
     const nestsUnderVault = (host: string) =>
       record.some((r) => r.url.includes(host) && decodeURIComponent(r.url).replace(/\+/g, " ").includes("Test Vault"));
