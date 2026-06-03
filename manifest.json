@@ -1,7 +1,7 @@
 {
   "id": "google-cloud-sync",
   "name": "Google Sync",
-  "version": "0.4.5",
+  "version": "0.4.6",
   "minAppVersion": "1.5.0",
   "description": "Comprehensive, security-first sync of your vault to a Google backend you own — Google Drive or Google Cloud Storage. Bring your own Google Cloud; no third-party server.",
   "author": "Sertaç Yıldız",

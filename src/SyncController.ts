@@ -212,7 +212,12 @@ export class SyncController {
         () => new Date(),
         this.settings.syncFolder
       );
-      const stateKey = `${id}/${this.remoteRoot(id)}`;
+      // Baseline key = backend + (Drive only) a layout marker + remote root.
+      // Drive's on-remote layout changed in 0.4.6 (flat → mirrored folders), so its
+      // marker bumps the key: the upgrade starts from an empty baseline and UPLOADS
+      // rather than reading the old flat baseline against the new layout and
+      // mass-deleting. GCS layout (object keys) is unchanged.
+      const stateKey = `${id}${id === "drive" ? "/mirror" : ""}/${this.remoteRoot(id)}`;
       const { state, report } = await engine.sync(this.settings.syncState[stateKey] ?? {});
       this.settings.syncState[stateKey] = state;
       merged.uploaded.push(...report.uploaded);
