@@ -45,7 +45,7 @@ function makeApp(): never {
 function oauthSettings(gcsToken: { data: string; enc: boolean }): GoogleSyncSettings {
   return {
     ...DEFAULT_SETTINGS,
-    provider: "gcs",
+    gcsEnabled: true,
     gcsAuthMode: "oauth",
     bucket: "b",
     oauthClientId: "cid",
@@ -54,7 +54,7 @@ function oauthSettings(gcsToken: { data: string; enc: boolean }): GoogleSyncSett
     accessId: "",
     e2ee: false,
     salt: null,
-    state: {},
+    syncState: {},
   };
 }
 
@@ -75,6 +75,10 @@ function makeFakeHttp(record: { method: string; url: string; headers: Record<str
     }
     if (url.includes("storage.googleapis.com")) {
       return resp(200, { etag: '"x"' }, "<ListBucketResult></ListBucketResult>");
+    }
+    if (url.includes("googleapis.com/drive") || url.includes("googleapis.com/upload/drive")) {
+      // find-folder / list → empty; create-folder (POST) → an id
+      return method === "POST" ? resp(200, {}, JSON.stringify({ id: "drive-folder" })) : resp(200, {}, JSON.stringify({ files: [] }));
     }
     return resp(404, {}, "");
   };
@@ -132,6 +136,33 @@ async function main(): Promise<void> {
       !!gcsCall && gcsCall.headers.authorization === "Bearer ACCESS-XYZ"
     );
     check("oauth sync does not leak an HMAC Authorization (Bearer only)", !!gcsCall && !/AWS4-HMAC/.test(gcsCall.headers.authorization ?? ""));
+  }
+
+  // (4) both backends enabled → a single sync() touches BOTH, each with its own baseline
+  {
+    const record: { method: string; url: string; headers: Record<string, string>; bodyStr: string }[] = [];
+    const settings: GoogleSyncSettings = {
+      ...DEFAULT_SETTINGS,
+      driveEnabled: true,
+      gcsEnabled: true,
+      bucket: "b",
+      oauthClientId: "cid",
+      driveToken: { enc: false, data: "DRIVE-REFRESH" },
+      gcsToken: { enc: false, data: "GCS-REFRESH" },
+      gcsAuthMode: "oauth",
+      syncState: {},
+    };
+    const c = new SyncController(makeApp(), settings, async () => {}, makeFakeHttp(record));
+    await c.prepare();
+    await c.sync();
+    check(
+      "both backends enabled → one sync hits BOTH Drive and GCS",
+      record.some((r) => r.url.includes("googleapis.com/drive")) && record.some((r) => r.url.includes("storage.googleapis.com"))
+    );
+    check(
+      "each backend keeps its own baseline (syncState has drive + gcs)",
+      "drive" in settings.syncState && "gcs" in settings.syncState
+    );
   }
 
   console.log(`\n=== gcs oauth: ${fail === 0 ? "ALL PASS" : fail + " FAILED"} (${pass} passed) ===`);

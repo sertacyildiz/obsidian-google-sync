@@ -25,6 +25,7 @@ class Component {
   onChange() { return this; }
   onClick() { return this; }
   setDisabled() { return this; }
+  setWarning() { return this; }
 }
 
 export class Setting {

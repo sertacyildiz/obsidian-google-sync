@@ -78,19 +78,26 @@ async function main(): Promise<void> {
   }
   check("settings tab display() builds the full UI without throwing", displayOk);
 
-  let displayOauthOk = true;
+  let displayFullOk = true;
   try {
-    plugin.settings.gcsAuthMode = "oauth";
-    plugin._settingTabs[0].display();
-    plugin.settings.gcsAuthMode = "hmac";
+    plugin.settings.driveEnabled = true;
+    plugin.settings.gcsEnabled = true;
+    plugin.settings.driveToken = { enc: false, data: "d" };
+    plugin.settings.gcsToken = { enc: false, data: "g" };
+    plugin._settingTabs[0].display(); // both backends + Advanced <details> + Disconnect buttons
+    plugin.settings.driveEnabled = false;
+    plugin.settings.gcsEnabled = false;
+    plugin.settings.driveToken = null;
+    plugin.settings.gcsToken = null;
   } catch (e) {
-    displayOauthOk = false;
-    console.log("    oauth display threw:", (e as Error).message);
+    displayFullOk = false;
+    console.log("    full display threw:", (e as Error).message);
   }
-  check("settings tab display() builds the GCS OAuth branch without throwing", displayOauthOk);
+  check("settings tab display() builds both backends + advanced + disconnect without throwing", displayFullOk);
 
   // ---- credentials: passphrase is OPTIONAL ----
-  plugin.settings.provider = "gcs";
+  plugin.settings.gcsEnabled = true;
+  plugin.settings.bucket = "test-bucket";
 
   // (1) no passphrase → plaintext, ready immediately, no salt
   await plugin.controller.saveGcsCredentials("GOOGACCESSID", "secret-A");

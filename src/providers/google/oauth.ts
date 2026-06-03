@@ -10,6 +10,14 @@ import { HttpSend } from "../RemoteProvider";
 const AUTH_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
 
+/**
+ * Built-in OAuth client id for the one-click "Connect" buttons (PKCE desktop
+ * app — public, no secret). Empty until the project owner registers a client
+ * and embeds it here; while empty, users connect with their own client id
+ * entered under "Advanced".
+ */
+export const BUILTIN_OAUTH_CLIENT_ID = "";
+
 export interface TokenSet {
   accessToken: string;
   refreshToken?: string;

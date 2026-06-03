@@ -10,57 +10,71 @@ export interface StoredSecret {
   data: string;
 }
 
+/** Default Drive folder name when the user leaves the folder field blank. */
+export const DEFAULT_APP_FOLDER = "Obsidian Sync";
+
 export interface GoogleSyncSettings {
-  provider: "drive" | "gcs";
-  // GCS config (non-secret)
+  // --- Google Drive backend (any Google account) ---
+  driveEnabled: boolean;
+  driveScopeLevel: "file" | "full";
+  /** Drive folder to sync into; "" → DEFAULT_APP_FOLDER. */
+  appFolderName: string;
+  driveToken: StoredSecret | null;
+
+  // --- Google Cloud Storage backend (your own GCP bucket) ---
+  gcsEnabled: boolean;
   bucket: string;
   prefix: string;
+  /** GCS auth: OAuth Bearer (one-click default) or HMAC SigV4 (advanced — tighter scope). */
+  gcsAuthMode: "oauth" | "hmac";
   region: string;
   service: string;
-  /** GCS auth: HMAC SigV4 (recommended — tighter scope) or OAuth Bearer (convenience — account-wide). */
-  gcsAuthMode: "hmac" | "oauth";
-  // sync scope + behaviour
+  accessId: string; // HMAC access id
+  gcsSecret: StoredSecret | null; // HMAC secret
+  gcsToken: StoredSecret | null; // OAuth refresh token
+
+  // --- shared OAuth client (public; PKCE). Empty → use the built-in client. ---
+  oauthClientId: string;
+
+  // --- sync behaviour ---
   syncFolder: string; // "" = whole vault
   autoSync: boolean;
   autoSyncMode: "on-change" | "interval";
   autoSyncIntervalMinutes: number;
-  /** Optional content end-to-end encryption (requires a passphrase). Default off. */
+
+  // --- optional content end-to-end encryption (advanced; default off) ---
   e2ee: boolean;
-  // GCS HMAC credential — accessId is an identifier; the secret is a StoredSecret (plain or sealed)
-  accessId: string;
-  gcsSecret: StoredSecret | null;
-  // GCS OAuth credential — refresh token (when gcsAuthMode === "oauth")
-  gcsToken: StoredSecret | null;
-  // OAuth client — public (PKCE); SHARED by the Drive + GCS "Connect" buttons. Refresh tokens are StoredSecrets.
-  oauthClientId: string;
-  driveScopeLevel: "file" | "full";
-  appFolderName: string;
-  driveToken: StoredSecret | null;
-  // crypto — salt is set only once a passphrase is in use (non-secret)
-  salt: string | null;
-  // last-synced baseline
-  state: SyncStateData;
+  salt: string | null; // set only once a passphrase is in use
+
+  // --- per-backend last-synced baseline, keyed by backend id ("drive" | "gcs") ---
+  syncState: Record<string, SyncStateData>;
 }
 
 export const DEFAULT_SETTINGS: GoogleSyncSettings = {
-  provider: "drive",
+  driveEnabled: false,
+  driveScopeLevel: "file",
+  appFolderName: DEFAULT_APP_FOLDER,
+  driveToken: null,
+
+  gcsEnabled: false,
   bucket: "",
   prefix: "",
+  gcsAuthMode: "oauth",
   region: "auto",
   service: "s3",
-  gcsAuthMode: "hmac",
+  accessId: "",
+  gcsSecret: null,
+  gcsToken: null,
+
+  oauthClientId: "",
+
   syncFolder: "",
   autoSync: false,
   autoSyncMode: "interval",
   autoSyncIntervalMinutes: 15,
+
   e2ee: false,
-  accessId: "",
-  gcsSecret: null,
-  gcsToken: null,
-  oauthClientId: "",
-  driveScopeLevel: "file",
-  appFolderName: "Obsidian (google-cloud-sync)",
-  driveToken: null,
   salt: null,
-  state: {},
+
+  syncState: {},
 };

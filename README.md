@@ -1,60 +1,47 @@
-# Google Cloud Sync for Obsidian
+# Google Sync for Obsidian
 
-Sync your Obsidian vault to a **Google backend you own** — **Google Drive** or **Google Cloud Storage** — with **end-to-end encryption** and **no third-party server**. You bring your own Google Cloud; your notes and credentials never pass through anyone else's infrastructure.
+Sync your Obsidian vault to a **Google backend you own** — your personal
+**Google Drive**, or your own **Google Cloud Storage** bucket — privately, with
+optional end-to-end encryption and **no third-party server**.
 
-> **Status: beta.** The Google Cloud Storage path is verified end-to-end (real two-device sync, including encrypted content, nested folders, and special-character / unicode filenames). The Google Drive path is built and unit-tested; please beta-test it with your own OAuth client and report issues. Use a **throwaway vault** first and keep backups.
+## Why this exists
 
-## Why
+Your notes are yours. Keeping them backed up and in sync across devices
+shouldn't mean paying a subscription, routing your vault through someone else's
+server, or letting a plugin rewrite your files.
 
-- **Your infrastructure, not ours.** No hosted relay and no shared app — you supply your own Google credentials (`drive.file` scope for Drive; an HMAC key or your own OAuth client for GCS).
-- **End-to-end encryption.** Content is encrypted on your device before upload (AES-256-GCM, key derived from your passphrase via PBKDF2). A leaked credential or bucket never exposes your notes.
-- **Credentials stay safe.** Secrets are **never synced and never logged**, and OAuth scopes are kept narrow. Encryption of the credential at rest is **optional** (set a passphrase) — see the security note for why.
-- **Two providers, one plugin.** Google Drive (OAuth2 PKCE) and Google Cloud Storage (HMAC + correct SigV4 signing that sidesteps the AWS-SDK incompatibilities most S3-interop tools hit against GCS).
+Google Sync keeps everything on **infrastructure you already own and control**:
 
-## Install (beta, via BRAT)
+- **Your cloud, no middleman.** Your notes and credentials go straight to your
+  own Google Drive or Cloud Storage — never through any relay or shared service.
+- **Private by design.** Optional end-to-end encryption means even a leaked
+  credential or a compromised bucket can't read your notes.
+- **Never touches your notes.** Sync state is tracked out-of-band — the plugin
+  never injects metadata or rewrites your Markdown.
+- **Safe two-way sync.** Changes flow both ways, deletions propagate, and a
+  conflict keeps *both* copies — it never silently loses data.
+- **Built for real vaults.** Handles large vaults, attachments, and
+  special-character / non-English filenames.
 
-1. Install the **BRAT** community plugin.
-2. BRAT → *Add beta plugin* → `sertacyildiz/obsidian-google-sync`.
-3. Enable **Google Cloud Sync** under *Community plugins*.
+## Two ways to connect
 
-(Or build from source — see below.)
+- **Google Drive** — for everyone. Connect with your ordinary Google account;
+  nothing else to set up.
+- **Google Cloud Storage** — for those already on Google Cloud. Sync to your own
+  bucket.
 
-## Setup
+Use one, or set up both and choose which is active.
 
-Open **Settings → Google Cloud Sync**. Choose a **sync folder** (or the whole vault), then configure a provider. A **passphrase is optional** — set one only if you want end-to-end encryption or to encrypt the stored credential at rest; it is never saved.
+## Privacy & security
 
-### Google Drive
-1. In the [Google Cloud Console](https://console.cloud.google.com/): create a project, enable the **Drive API**, configure the **OAuth consent screen** (add yourself as a test user), and create an **OAuth client ID** of type **Desktop app**.
-2. Paste the **client ID**, choose a scope (**App files** = `drive.file`, recommended; or **Full Drive**), then **Connect Google Drive** and approve in your browser.
+Security is the first priority, not an afterthought: credentials are never
+synced and never logged, permission scopes are kept minimal, and content
+encryption is available so a backend leak is never a content leak. Details in
+[`SECURITY.md`](SECURITY.md).
 
-### Google Cloud Storage
+## Status
 
-Create a bucket first (uniform bucket-level access; public access prevented), then pick an **Auth method**:
-
-- **HMAC key — recommended (least privilege).** Console → *Cloud Storage → Settings → Interoperability* → create an **HMAC key** (ideally for a service account scoped to just this bucket). Paste the **bucket**, **Access ID**, and **Secret**, then **Save GCS credentials**.
-- **OAuth — convenience.** Reuse the shared **OAuth client ID** (the same Desktop client as Drive; enable the *Cloud Storage* API on its project), paste the **bucket**, then **Connect Google Cloud Storage** and approve in your browser. ⚠️ **GCS has no per-bucket OAuth scope:** the granted token (`devstorage.read_write`) can read/write **every** bucket your Google account can reach. For least privilege prefer HMAC, or connect with a Google account / project that can only reach this one bucket.
-
-Then **Sync now** (ribbon icon or command palette). Optionally enable **auto-sync** — on every change, or every N minutes.
-
-## How sync works
-
-- **Two-way** sync between your chosen folder and the remote, tracked by a local state file.
-- **Conflicts never lose data:** if a file changed on both sides, both are kept (the remote copy is saved as `<name>.conflict-<timestamp>`).
-- **Deletions propagate** in both directions.
-- The plugin's own config (including the encrypted credential) is **never** part of the synced set.
-
-## Security
-
-See [`SECURITY.md`](SECURITY.md). In short: bring-your-own-cloud, no third-party server, credentials encrypted at rest and never synced, and optional end-to-end content encryption.
-
-## Build from source
-
-```bash
-npm install
-npm run build   # type-checks, then bundles to main.js
-```
-
-Copy `main.js`, `manifest.json`, and `styles.css` into `<vault>/.obsidian/plugins/google-cloud-sync/`.
+Beta. Setup and usage documentation is on the way.
 
 ## License
 
