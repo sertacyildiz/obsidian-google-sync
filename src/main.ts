@@ -173,6 +173,15 @@ class GoogleSyncSettingTab extends PluginSettingTab {
             this.display();
           })
         );
+      new Setting(containerEl)
+        .setName("Backup mode (never delete local files)")
+        .setDesc("Off (default): a true two-way sync — deletions sync across devices, but are recoverable (moved to your trash) and a mass deletion is halted for safety. On: a file missing on Drive is re-uploaded instead of deleted locally — choose this only for a one-way single-device → Drive backup.")
+        .addToggle((t) =>
+          t.setValue(s.driveProtectLocal).onChange(async (v) => {
+            s.driveProtectLocal = v;
+            await this.plugin.saveSettings();
+          })
+        );
       const dadv = containerEl.createEl("details");
       dadv.createEl("summary", { text: "Advanced" });
       new Setting(dadv)
@@ -243,6 +252,15 @@ class GoogleSyncSettingTab extends PluginSettingTab {
             await c.disconnectGcs();
             this.notify("Google Cloud disconnected.");
             this.display();
+          })
+        );
+      new Setting(containerEl)
+        .setName("Backup mode (never delete local files)")
+        .setDesc("Off (default): a true two-way sync — deletions sync across devices, but are recoverable (moved to your trash) and a mass deletion is halted for safety. On: a file missing in the bucket is re-uploaded instead of deleted locally — choose this only for a one-way single-device → bucket backup.")
+        .addToggle((t) =>
+          t.setValue(s.gcsProtectLocal).onChange(async (v) => {
+            s.gcsProtectLocal = v;
+            await this.plugin.saveSettings();
           })
         );
       const gadv = containerEl.createEl("details");

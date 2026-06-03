@@ -9,6 +9,7 @@ import { LocalStore } from "../src/sync/LocalStore";
 import { LocalFile } from "../src/sync/types";
 import { PutResult, RemoteObject, RemoteProvider } from "../src/providers/RemoteProvider";
 import { sha256Hex } from "../src/util/hash";
+import { DEFAULT_SETTINGS } from "../src/settings";
 
 const enc = (s: string): ArrayBuffer => new TextEncoder().encode(s).buffer;
 const dec = (b: ArrayBuffer): string => new TextDecoder().decode(b);
@@ -137,6 +138,27 @@ async function main(): Promise<void> {
     const { report } = await newEngine(L, R).sync(s1);
     check("remote delete propagates to local", report.deletedLocal.includes("a.md") && !L.store.has("a.md"));
   }
+  // 7b. protect-local ON: remote delete keeps the local file + restores it on the remote (never deletes local)
+  {
+    const L = new FakeLocal(), R = new FakeRemote();
+    await L.write("a.md", enc("keep"));
+    const s1 = (await new SyncEngine(L, R, identityCryptor, FIXED, "", true).sync({})).state;
+    await R.delete("a.md");
+    const { report } = await new SyncEngine(L, R, identityCryptor, FIXED, "", true).sync(s1);
+    check(
+      "protect-local: remote delete keeps local + re-uploads (no local delete)",
+      report.deletedLocal.length === 0 && L.store.has("a.md") && R.store.has("a.md") && report.uploaded.includes("a.md")
+    );
+  }
+  // 7c. protect-local ON still propagates LOCAL deletes to the remote
+  {
+    const L = new FakeLocal(), R = new FakeRemote();
+    await L.write("a.md", enc("x"));
+    const s1 = (await new SyncEngine(L, R, identityCryptor, FIXED, "", true).sync({})).state;
+    await L.delete("a.md");
+    const { report } = await new SyncEngine(L, R, identityCryptor, FIXED, "", true).sync(s1);
+    check("protect-local: local delete still removes from remote", report.deletedRemote.includes("a.md") && !R.store.has("a.md"));
+  }
   // 8. both modified -> conflict (keep both)
   {
     const L = new FakeLocal(), R = new FakeRemote();
@@ -173,6 +195,38 @@ async function main(): Promise<void> {
         !L.store.has("Other/out.md")
     );
   }
+
+  // 11. SAFETY: a sync that would mass-delete LOCAL files is aborted (bad/empty remote listing)
+  {
+    const L = new FakeLocal(), R = new FakeRemote();
+    for (let i = 0; i < 15; i++) await L.write(`f${i}.md`, enc("v" + i));
+    const s1 = (await newEngine(L, R).sync({})).state; // 15 files synced on both sides
+    for (let i = 0; i < 15; i++) await R.delete(`f${i}.md`); // remote listing comes back empty
+    let aborted = false;
+    try { await newEngine(L, R).sync(s1); } catch (e) { aborted = (e as Error).name === "MassDeletionAbort"; }
+    check("mass LOCAL deletion is aborted — nothing deleted locally", aborted && (await L.list()).length === 15);
+  }
+  // 12. SAFETY: a sync that would mass-delete REMOTE files is aborted (local listing glitched empty)
+  {
+    const L = new FakeLocal(), R = new FakeRemote();
+    for (let i = 0; i < 15; i++) await L.write(`f${i}.md`, enc("v" + i));
+    const s1 = (await newEngine(L, R).sync({})).state;
+    for (let i = 0; i < 15; i++) await L.delete(`f${i}.md`); // local vanished (e.g. adapter glitch)
+    let aborted = false;
+    try { await newEngine(L, R).sync(s1); } catch (e) { aborted = (e as Error).name === "MassDeletionAbort"; }
+    check("mass REMOTE deletion is aborted — nothing deleted on remote", aborted && R.store.size === 15);
+  }
+  // 13. a deletion UNDER the safety limit still propagates normally (guard must not over-block)
+  {
+    const L = new FakeLocal(), R = new FakeRemote();
+    for (let i = 0; i < 15; i++) await L.write(`f${i}.md`, enc("v" + i));
+    const s1 = (await newEngine(L, R).sync({})).state;
+    await R.delete("f0.md");
+    const { report } = await newEngine(L, R).sync(s1);
+    check("a small deletion under the guard still deletes locally", report.deletedLocal.includes("f0.md") && !L.store.has("f0.md"));
+  }
+  // 14. protect-local defaults OFF — multi-device deletes propagate; safety comes from the guard + trash, not from never-deleting
+  check("protect-local defaults OFF for both backends", DEFAULT_SETTINGS.driveProtectLocal === false && DEFAULT_SETTINGS.gcsProtectLocal === false);
 
   console.log(`\n=== sync engine: ${failed === 0 ? "ALL PASS" : failed + " FAILED"} (${passed} passed) ===`);
   if (failed) process.exitCode = 1;

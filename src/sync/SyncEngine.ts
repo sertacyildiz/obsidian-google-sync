@@ -6,6 +6,30 @@ import { LocalStore } from "./LocalStore";
 import { FileState, LocalFile, SyncReport, SyncStateData } from "./types";
 
 /**
+ * Thrown by {@link SyncEngine.sync} when a single sync would delete more files
+ * than the safety guard allows — almost always a sign of a bad/empty listing
+ * (auth glitch, wrong remote folder) rather than a genuine mass delete. The sync
+ * is aborted with NOTHING changed, so the condition is recoverable.
+ */
+export class MassDeletionAbort extends Error {
+  constructor(
+    readonly localDeletes: number,
+    readonly remoteDeletes: number,
+    readonly limit: number
+  ) {
+    super(
+      `Sync aborted for safety: it would delete ${localDeletes} local and ${remoteDeletes} remote file(s) at once ` +
+        `(limit ${limit}). This usually means the other side listed empty or wrong, not a real mass delete. ` +
+        `Nothing was changed — check the connection/folder, then sync again.`
+    );
+    this.name = "MassDeletionAbort";
+  }
+}
+
+/** Default delete guard: allow up to max(10, 20% of tracked files) deletions per side, per sync. */
+export const defaultDeleteGuard = (trackedCount: number): number => Math.max(10, Math.ceil(trackedCount * 0.2));
+
+/**
  * Provider-agnostic two-way sync via a three-way merge (local vs remote vs the
  * last-synced baseline `state`). Conflict policy is **never lose data**:
  *  - modify/modify (or new-on-both): keep both — write remote as a
@@ -22,13 +46,36 @@ export class SyncEngine {
     private readonly cryptor: Cryptor,
     private readonly now: () => Date,
     /** Sync-root-relative prefix; remote listing is scoped to it (local is scoped by the LocalStore). */
-    private readonly scope: string = ""
+    private readonly scope: string = "",
+    /** Protect local: a file missing on the remote is re-uploaded, never deleted locally. */
+    private readonly protectLocal: boolean = false,
+    /** Abort the whole sync if it would delete more than this many files on either side. */
+    private readonly deleteGuard: (trackedCount: number) => number = defaultDeleteGuard
   ) {}
 
   async sync(prev: SyncStateData): Promise<{ state: SyncStateData; report: SyncReport }> {
     const [localList, remoteList] = await Promise.all([this.local.list(), this.remote.list(this.scope)]);
     const localMap = new Map<string, LocalFile>(localList.map((f) => [f.path, f]));
     const remoteMap = new Map<string, RemoteObject>(remoteList.map((o) => [o.path, o]));
+
+    // Safety guard — runs BEFORE anything is applied. A correct sync deletes a
+    // file only when it was synced before (present in `prev`), is unchanged on
+    // the surviving side, and has vanished from the other side. If that count is
+    // implausibly large it almost always means a bad/empty listing (auth glitch,
+    // wrong folder), not a real mass delete — so abort the whole sync untouched.
+    let plannedLocalDeletes = 0;
+    let plannedRemoteDeletes = 0;
+    for (const path of Object.keys(prev)) {
+      const S = prev[path];
+      const L = localMap.get(path);
+      const R = remoteMap.get(path);
+      if (!this.protectLocal && L && L.hash === S.localHash && !R) plannedLocalDeletes++;
+      if (!L && R && R.version === S.remoteVersion) plannedRemoteDeletes++;
+    }
+    const limit = this.deleteGuard(Object.keys(prev).length);
+    if (plannedLocalDeletes > limit || plannedRemoteDeletes > limit) {
+      throw new MassDeletionAbort(plannedLocalDeletes, plannedRemoteDeletes, limit);
+    }
 
     const state: SyncStateData = { ...prev };
     const report: SyncReport = {
@@ -88,6 +135,7 @@ export class SyncEngine {
 
     if (!localChanged && remoteChanged) {
       if (R) await this.download(path, R, state, report);
+      else if (this.protectLocal && L) await this.upload(path, L, state, report); // protect local: keep it, restore on remote
       else await this.deleteLocal(path, state, report);
       return;
     }

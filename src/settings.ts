@@ -20,6 +20,8 @@ export interface GoogleSyncSettings {
   /** Drive folder to sync into; "" → DEFAULT_APP_FOLDER. */
   appFolderName: string;
   driveToken: StoredSecret | null;
+  /** Protect local files: a file missing on Drive is re-uploaded, never deleted locally (local→Drive deletes still apply). */
+  driveProtectLocal: boolean;
 
   // --- Google Cloud Storage backend (your own GCP bucket) ---
   gcsEnabled: boolean;
@@ -32,6 +34,8 @@ export interface GoogleSyncSettings {
   accessId: string; // HMAC access id
   gcsSecret: StoredSecret | null; // HMAC secret
   gcsToken: StoredSecret | null; // OAuth refresh token
+  /** Protect local files: a file missing in the bucket is re-uploaded, never deleted locally (local→bucket deletes still apply). */
+  gcsProtectLocal: boolean;
 
   // --- shared OAuth client. Empty → built-in client. Secret sent only if the client needs one (Desktop/Web). ---
   oauthClientId: string;
@@ -58,6 +62,7 @@ export const DEFAULT_SETTINGS: GoogleSyncSettings = {
   driveScopeLevel: "file",
   appFolderName: DEFAULT_APP_FOLDER,
   driveToken: null,
+  driveProtectLocal: false,
 
   gcsEnabled: false,
   bucket: "",
@@ -68,6 +73,7 @@ export const DEFAULT_SETTINGS: GoogleSyncSettings = {
   accessId: "",
   gcsSecret: null,
   gcsToken: null,
+  gcsProtectLocal: false,
 
   oauthClientId: "",
   oauthClientSecret: "",

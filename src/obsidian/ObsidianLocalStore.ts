@@ -55,6 +55,11 @@ export class ObsidianLocalStore implements LocalStore {
 
   async delete(path: string): Promise<void> {
     const p = normalizePath(path);
-    if (await this.app.vault.adapter.exists(p)) await this.app.vault.adapter.remove(p);
+    if (!(await this.app.vault.adapter.exists(p))) return;
+    // NEVER hard-delete. Route through the trash so a wrong "remote deleted this"
+    // conclusion is always recoverable. Prefer the OS trash; fall back to the
+    // vault-local `.trash` if the system trash is unavailable or fails.
+    const trashed = await this.app.vault.adapter.trashSystem(p).catch(() => false);
+    if (!trashed) await this.app.vault.adapter.trashLocal(p);
   }
 }

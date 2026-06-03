@@ -30,6 +30,8 @@ function makeApp(): unknown {
         exists: async () => true,
         mkdir: async () => {},
         remove: async () => {},
+        trashSystem: async () => true,
+        trashLocal: async () => {},
       },
       on: () => ({}),
     },

@@ -210,7 +210,8 @@ export class SyncController {
         this.buildProvider(id),
         cryptor,
         () => new Date(),
-        this.settings.syncFolder
+        this.settings.syncFolder,
+        id === "drive" ? this.settings.driveProtectLocal : this.settings.gcsProtectLocal
       );
       // Baseline key = backend + (Drive only) a layout marker + remote root.
       // Drive's on-remote layout changed in 0.4.6 (flat → mirrored folders), so its
