@@ -37,6 +37,12 @@ const context = await esbuild.context({
   treeShaking: true,
   outfile: "main.js",
   minify: prod,
+  // Inject the built-in OAuth client secret at build time so it ships in main.js
+  // (one-click for end users) without ever being committed to source — GitHub
+  // push protection blocks committed OAuth secrets. Empty unless GSYNC_BUILTIN_SECRET is set.
+  define: {
+    "process.env.GSYNC_BUILTIN_SECRET": JSON.stringify(process.env.GSYNC_BUILTIN_SECRET || ""),
+  },
 });
 
 if (prod) {

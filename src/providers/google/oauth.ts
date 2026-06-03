@@ -13,20 +13,23 @@ const AUTH_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
 
 /**
- * Built-in OAuth client id for the one-click "Connect" buttons. A PKCE "Desktop
- * app" client — the id is public by design (no client secret is used or shipped),
- * so embedding it is safe. Users can still override it with their own client id
- * under "Advanced".
+ * Built-in OAuth client id for the one-click "Connect" buttons (a Desktop OAuth
+ * client). The id is public by design, so embedding it is safe; the matching
+ * secret is injected at build time (see BUILTIN_OAUTH_CLIENT_SECRET). Users can
+ * override it with their own client id under "Advanced".
  */
 export const BUILTIN_OAUTH_CLIENT_ID = "941838331259-g9ib1fukco8eqntbqagdqo8jsp2ha7l6.apps.googleusercontent.com";
 
 /**
- * Optional client secret for the built-in client. Google's "Desktop"/"Web" OAuth
- * clients require a secret at token exchange even with PKCE; for an installed
- * (Desktop) app the secret is non-confidential, so shipping it is acceptable.
- * Empty for client types that don't need it; only sent when non-empty.
+ * Built-in client secret, INJECTED AT BUILD TIME from the GSYNC_BUILTIN_SECRET
+ * env var (esbuild.config.mjs `define`). This keeps the secret in the released
+ * main.js — so end users get one-click with no setup — while it never lives in
+ * the source repo (GitHub push protection blocks committing OAuth secrets). For
+ * an installed (Desktop) app the secret is non-confidential, so shipping it in
+ * the bundle is fine (the rclone model). Empty in dev/test builds; users can
+ * override it with their own under "Advanced".
  */
-export const BUILTIN_OAUTH_CLIENT_SECRET = "";
+export const BUILTIN_OAUTH_CLIENT_SECRET = process.env.GSYNC_BUILTIN_SECRET || "";
 
 export interface TokenSet {
   accessToken: string;
