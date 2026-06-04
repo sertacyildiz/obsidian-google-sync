@@ -157,10 +157,14 @@ export class DriveProvider implements RemoteProvider {
   }
 
   async delete(path: string): Promise<void> {
-    const f = await this.locate(path);
+    const f = await this.locate(path); // locate filters trashed=false → already-trashed/missing ⇒ no-op
     if (!f) return;
-    const res = await this.http("DELETE", `${API}/files/${f.id}`, await this.hdrs());
-    if (res.status !== 404 && (res.status < 200 || res.status >= 300)) throw new Error(`Drive DELETE ${path}: ${res.status}`);
+    // Soft-delete: move to Drive's trash (recoverable for ~30 days) instead of a
+    // permanent files.delete, so a wrong "deleted locally" conclusion is never
+    // irreversible — mirrors the local recoverable-trash policy.
+    const body = new TextEncoder().encode(JSON.stringify({ trashed: true })).buffer;
+    const res = await this.http("PATCH", `${API}/files/${f.id}`, await this.hdrs({ "content-type": "application/json" }), body);
+    if (res.status !== 404 && (res.status < 200 || res.status >= 300)) throw new Error(`Drive trash ${path}: ${res.status}`);
   }
 
   async list(prefix = ""): Promise<RemoteObject[]> {
