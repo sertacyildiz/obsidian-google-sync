@@ -4,6 +4,13 @@ export interface RemoteObject {
   /** Opaque version (GCS generation / ETag) for change detection. */
   version: string;
   size: number;
+  /**
+   * Last-modified time in epoch ms — the remote's own upload/modify time
+   * (Drive `modifiedTime`, GCS `Last-Modified`). Used ONLY to pick the newer
+   * side in a modify/modify conflict; never for change detection. Optional:
+   * absent ⇒ treated as the oldest possible time (the other side wins).
+   */
+  mtime?: number;
 }
 
 export interface PutResult {

@@ -63,7 +63,7 @@ export class GcsProvider implements RemoteProvider {
     const res = await this.send("HEAD", this.objectUrl(path), undefined, {});
     if (res.status === 404) return null;
     if (res.status < 200 || res.status >= 300) throw await gcsError("HEAD", path, res);
-    return { path, version: versionOf(res), size: Number(res.headers["content-length"] ?? "0") };
+    return { path, version: versionOf(res), size: Number(res.headers["content-length"] ?? "0"), mtime: msOf(res.headers["last-modified"]) };
   }
 
   async delete(path: string): Promise<void> {
@@ -96,6 +96,13 @@ export class GcsProvider implements RemoteProvider {
 /** Normalize an ETag for change detection — strip surrounding quotes. */
 function etagOf(raw: string | undefined): string {
   return (raw ?? "").replace(/"/g, "");
+}
+
+/** `LastModified` (ISO8601) / `Last-Modified` (RFC1123) → epoch ms; `undefined` if absent/unparseable. */
+function msOf(t?: string): number | undefined {
+  if (!t) return undefined;
+  const n = Date.parse(t);
+  return Number.isNaN(n) ? undefined : n;
 }
 
 /**
@@ -135,7 +142,7 @@ export function parseListXml(xml: string, stripPrefix: string): RemoteObject[] {
     const block = m[1];
     const key = matchTag(block, "Key") ?? "";
     const path = pfx && key.startsWith(pfx) ? key.slice(pfx.length) : key;
-    objects.push({ path, version: etagOf(matchTag(block, "ETag")), size: Number(matchTag(block, "Size") ?? "0") });
+    objects.push({ path, version: etagOf(matchTag(block, "ETag")), size: Number(matchTag(block, "Size") ?? "0"), mtime: msOf(matchTag(block, "LastModified")) });
   }
   return objects;
 }

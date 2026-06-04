@@ -17,19 +17,24 @@ const FIXED = (): Date => new Date("2026-02-03T04:05:06Z");
 
 class FakeRemote implements RemoteProvider {
   readonly id = "fake";
-  store = new Map<string, { data: ArrayBuffer; version: number }>();
+  store = new Map<string, { data: ArrayBuffer; version: number; mtime?: number }>();
   private v = 0;
   async put(path: string, data: ArrayBuffer): Promise<PutResult> {
     this.v++;
-    this.store.set(path, { data, version: this.v });
+    this.store.set(path, { data, version: this.v, mtime: this.v });
     return { version: String(this.v) };
+  }
+  /** Test hook: override an entry's last-modified time (undefined = provider didn't supply one). */
+  setMtime(path: string, mtime: number | undefined): void {
+    const e = this.store.get(path);
+    if (e) e.mtime = mtime;
   }
   async get(path: string): Promise<ArrayBuffer | null> {
     return this.store.get(path)?.data ?? null;
   }
   async head(path: string): Promise<RemoteObject | null> {
     const e = this.store.get(path);
-    return e ? { path, version: String(e.version), size: e.data.byteLength } : null;
+    return e ? { path, version: String(e.version), size: e.data.byteLength, mtime: e.mtime } : null;
   }
   async delete(path: string): Promise<void> {
     this.store.delete(path);
@@ -37,7 +42,7 @@ class FakeRemote implements RemoteProvider {
   async list(prefix = ""): Promise<RemoteObject[]> {
     return [...this.store.entries()]
       .filter(([path]) => !prefix || path.startsWith(prefix))
-      .map(([path, e]) => ({ path, version: String(e.version), size: e.data.byteLength }));
+      .map(([path, e]) => ({ path, version: String(e.version), size: e.data.byteLength, mtime: e.mtime }));
   }
 }
 
@@ -58,6 +63,10 @@ class FakeLocal implements LocalStore {
   async write(path: string, data: ArrayBuffer): Promise<void> {
     this.store.set(path, data);
     this.mt.set(path, ++this.clock);
+  }
+  /** Test hook: override a file's mtime so conflict-direction tests are deterministic. */
+  setMtime(path: string, mtime: number): void {
+    this.mt.set(path, mtime);
   }
   async delete(path: string): Promise<void> {
     this.store.delete(path);
@@ -159,19 +168,81 @@ async function main(): Promise<void> {
     const { report } = await new SyncEngine(L, R, identityCryptor, FIXED, "", true).sync(s1);
     check("protect-local: local delete still removes from remote", report.deletedRemote.includes("a.md") && !R.store.has("a.md"));
   }
-  // 8. both modified -> conflict (keep both)
+  // 8a. both modified, REMOTE newer -> remote wins as canonical, older local kept as backup
+  {
+    const L = new FakeLocal(), R = new FakeRemote();
+    await L.write("a.md", enc("base"));
+    const s1 = (await newEngine(L, R).sync({})).state;
+    await L.write("a.md", enc("localEdit"));
+    L.setMtime("a.md", 100);
+    await R.put("a.md", enc("remoteEdit"));
+    R.setMtime("a.md", 200); // remote is newer
+    const { state, report } = await newEngine(L, R).sync(s1);
+    const cp = report.conflicts[0]?.conflictPath;
+    check("conflict (remote newer): recorded once with a stamped copy", report.conflicts.length === 1 && !!cp && cp.includes(".conflict-20260203T040506Z"));
+    check("conflict (remote newer): remote wins as canonical (local content overwritten)", dec(L.store.get("a.md")!) === "remoteEdit");
+    check("conflict (remote newer): older local kept as recoverable backup", !!cp && dec(L.store.get(cp)!) === "localEdit");
+    check("conflict (remote newer): baseline adopts the remote version", state["a.md"]?.remoteVersion === String(R.store.get("a.md")!.version));
+  }
+  // 8b. both modified, LOCAL newer -> local wins as canonical (uploaded), older remote kept as backup
+  {
+    const L = new FakeLocal(), R = new FakeRemote();
+    await L.write("a.md", enc("base"));
+    const s1 = (await newEngine(L, R).sync({})).state;
+    await L.write("a.md", enc("localEdit"));
+    L.setMtime("a.md", 200); // local is newer
+    await R.put("a.md", enc("remoteEdit"));
+    R.setMtime("a.md", 100);
+    const { report } = await newEngine(L, R).sync(s1);
+    const cp = report.conflicts[0]?.conflictPath;
+    check("conflict (local newer): recorded once", report.conflicts.length === 1 && !!cp);
+    check("conflict (local newer): local wins as canonical (local + remote)", dec(L.store.get("a.md")!) === "localEdit" && dec(R.store.get("a.md")!.data) === "localEdit");
+    check("conflict (local newer): older remote kept as recoverable backup", !!cp && dec(L.store.get(cp)!) === "remoteEdit");
+  }
+  // 8c. both "changed" vs baseline but content CONVERGED -> not a conflict; adopt silently
+  {
+    const L = new FakeLocal(), R = new FakeRemote();
+    await L.write("a.md", enc("base"));
+    const s1 = (await newEngine(L, R).sync({})).state;
+    await L.write("a.md", enc("converged"));
+    await R.put("a.md", enc("converged")); // both edited to the same content
+    const { state, report } = await newEngine(L, R).sync(s1);
+    check("identical content is NOT a conflict (no copy, no transfer)", report.conflicts.length === 0 && report.uploaded.length === 0 && report.downloaded.length === 0);
+    check("identical content adopts the baseline", state["a.md"]?.localHash === (await sha256Hex(enc("converged"))));
+  }
+  // 8d. BOOTSTRAP (the reported bug): new device, empty baseline, SAME content on both sides -> no conflict
+  {
+    const L = new FakeLocal(), R = new FakeRemote();
+    await L.write("note.md", enc("note"));
+    await R.put("note.md", enc("note")); // already on Drive, byte-identical
+    const { state, report } = await newEngine(L, R).sync({}); // fresh device: no baseline
+    check("bootstrap identical: no .conflict copy, no upload/download", report.conflicts.length === 0 && report.uploaded.length === 0 && report.downloaded.length === 0);
+    check("bootstrap identical: baseline adopted so next sync is a noop", !!state["note.md"]?.localHash && !!state["note.md"]?.remoteVersion);
+  }
+  // 8e. BOOTSTRAP, differing content, remote newer -> remote (the newer copy) wins, old local backed up
+  {
+    const L = new FakeLocal(), R = new FakeRemote();
+    await L.write("note.md", enc("old local copy"));
+    L.setMtime("note.md", 100);
+    await R.put("note.md", enc("newer copy from other pc"));
+    R.setMtime("note.md", 200);
+    const { report } = await newEngine(L, R).sync({}); // no baseline
+    const cp = report.conflicts[0]?.conflictPath;
+    check("bootstrap differing (remote newer): newer remote wins", dec(L.store.get("note.md")!) === "newer copy from other pc");
+    check("bootstrap differing (remote newer): old local kept as backup", !!cp && dec(L.store.get(cp)!) === "old local copy");
+  }
+  // 8f. both modified but REMOTE mtime unknown -> safe default: local wins, remote backed up
   {
     const L = new FakeLocal(), R = new FakeRemote();
     await L.write("a.md", enc("base"));
     const s1 = (await newEngine(L, R).sync({})).state;
     await L.write("a.md", enc("localEdit"));
     await R.put("a.md", enc("remoteEdit"));
+    R.setMtime("a.md", undefined); // provider gave no modified time
     const { report } = await newEngine(L, R).sync(s1);
     const cp = report.conflicts[0]?.conflictPath;
-    check("conflict recorded once", report.conflicts.length === 1 && !!cp);
-    check("conflict keeps remote copy locally", !!cp && dec(L.store.get(cp)!) === "remoteEdit");
-    check("conflict keeps local as canonical (local + remote)", dec(L.store.get("a.md")!) === "localEdit" && dec(R.store.get("a.md")!.data) === "localEdit");
-    check("conflict copy name carries the stamp", !!cp && cp.includes(".conflict-20260203T040506Z"));
+    check("conflict (remote mtime unknown): local wins (safe default)", dec(L.store.get("a.md")!) === "localEdit" && dec(R.store.get("a.md")!.data) === "localEdit");
+    check("conflict (remote mtime unknown): remote kept as backup", !!cp && dec(L.store.get(cp)!) === "remoteEdit");
   }
   // 9. path traversal in remote -> error, nothing written outside
   {

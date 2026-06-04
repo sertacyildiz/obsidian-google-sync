@@ -14,6 +14,13 @@ export function escapeDriveQuery(v: string): string {
   return v.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
 }
 
+/** RFC3339 `modifiedTime` → epoch ms; `undefined` when absent or unparseable. */
+function msOf(t?: string): number | undefined {
+  if (!t) return undefined;
+  const n = Date.parse(t);
+  return Number.isNaN(n) ? undefined : n;
+}
+
 interface DriveFile {
   id?: string;
   name?: string;
@@ -108,13 +115,13 @@ export class DriveProvider implements RemoteProvider {
     return (await this.findFolder(name, parent)) ?? (await this.createFolder(name, parent));
   }
 
-  private async locate(path: string): Promise<{ id: string; version: string; size: number } | null> {
+  private async locate(path: string): Promise<{ id: string; version: string; size: number; mtime?: number } | null> {
     const parent = await this.folderFor(this.dirOf(path), false);
     if (!parent) return null;
     const q = `name='${escapeDriveQuery(this.baseOf(path))}' and '${parent}' in parents and mimeType!='${FOLDER_MIME}' and trashed=false`;
     const res = await this.http("GET", `${API}/files?q=${encodeURIComponent(q)}&fields=${encodeURIComponent("files(id,md5Checksum,modifiedTime,size)")}&spaces=drive`, await this.hdrs());
     const f = (await this.json<{ files?: DriveFile[] }>(res, "find")).files?.[0];
-    return f?.id ? { id: f.id, version: f.md5Checksum ?? f.modifiedTime ?? "", size: Number(f.size ?? 0) } : null;
+    return f?.id ? { id: f.id, version: f.md5Checksum ?? f.modifiedTime ?? "", size: Number(f.size ?? 0), mtime: msOf(f.modifiedTime) } : null;
   }
 
   async put(path: string, data: ArrayBuffer, contentType = "application/octet-stream"): Promise<PutResult> {
@@ -146,7 +153,7 @@ export class DriveProvider implements RemoteProvider {
 
   async head(path: string): Promise<RemoteObject | null> {
     const f = await this.locate(path);
-    return f ? { path, version: f.version, size: f.size } : null;
+    return f ? { path, version: f.version, size: f.size, mtime: f.mtime } : null;
   }
 
   async delete(path: string): Promise<void> {
@@ -184,7 +191,7 @@ export class DriveProvider implements RemoteProvider {
             await this.walk(f.id, childPath, out);
           }
         } else {
-          out.push({ path: childPath, version: f.md5Checksum ?? f.modifiedTime ?? "", size: Number(f.size ?? 0) });
+          out.push({ path: childPath, version: f.md5Checksum ?? f.modifiedTime ?? "", size: Number(f.size ?? 0), mtime: msOf(f.modifiedTime) });
         }
       }
       pageToken = data.nextPageToken;

@@ -32,8 +32,13 @@ export const defaultDeleteGuard = (trackedCount: number): number => Math.max(10,
 /**
  * Provider-agnostic two-way sync via a three-way merge (local vs remote vs the
  * last-synced baseline `state`). Conflict policy is **never lose data**:
- *  - modify/modify (or new-on-both): keep both — write remote as a
- *    `<name>.conflict-<utc>` copy locally, keep local as canonical, upload local.
+ *  - modify/modify (or new-on-both, e.g. the first sync of an already-populated
+ *    vault on a new device): if both sides hold identical content it is NOT a
+ *    conflict — adopt the baseline silently. Otherwise the newer side (by mtime)
+ *    becomes the canonical file and the older one is kept as a recoverable
+ *    `<name>.conflict-<utc>` copy. When the remote mtime is unknown the local
+ *    side wins (a safe default — the remote mtime is its upload time, which can
+ *    lag the real edit time).
  *  - local-deleted vs remote-modified: restore (download).
  *  - local-modified vs remote-deleted: re-upload (local wins).
  * Deletions propagate via the baseline (a path in `state` but missing on one
@@ -114,16 +119,9 @@ export class SyncEngine {
       return;
     }
 
-    // modify/modify (or new-on-both): keep both.
+    // modify/modify (or new-on-both, e.g. first sync of a populated vault on a new device).
     if (L && R && localChanged && remoteChanged) {
-      const remoteBytes = await this.remote.get(path);
-      if (remoteBytes) {
-        const plain = await this.cryptor.decrypt(remoteBytes);
-        const cp = safeVaultPath(conflictPath(path, this.stamp()));
-        await this.local.write(cp, plain);
-        report.conflicts.push({ path, conflictPath: cp });
-      }
-      await this.upload(path, L, state, report);
+      await this.resolveConflict(path, L, R, state, report);
       return;
     }
 
@@ -150,6 +148,53 @@ export class SyncEngine {
       return;
     }
     delete state[path]; // both deleted
+  }
+
+  /**
+   * Both sides changed since the baseline (or there is no baseline yet). Resolve
+   * without ever losing data:
+   *  - identical content ⇒ not a conflict; adopt the baseline silently. This is
+   *    the common case when an already-populated vault is first synced on a new
+   *    device, where every co-existing file would otherwise look like a conflict.
+   *  - otherwise the newer side (by mtime) becomes canonical and the older side
+   *    is written as a recoverable `<name>.conflict-<utc>` copy. The remote mtime
+   *    is its upload time and may be unknown; only when it is strictly newer than
+   *    the local mtime does the remote win — otherwise the local side wins.
+   */
+  private async resolveConflict(
+    path: string,
+    L: LocalFile,
+    R: RemoteObject,
+    state: SyncStateData,
+    report: SyncReport
+  ): Promise<void> {
+    const remoteBytes = await this.remote.get(path);
+    if (remoteBytes === null) {
+      await this.upload(path, L, state, report); // remote vanished mid-run; next sync reconciles
+      return;
+    }
+    const remotePlain = await this.cryptor.decrypt(remoteBytes);
+    const remoteHash = await sha256Hex(remotePlain);
+
+    if (remoteHash === L.hash) {
+      state[path] = { localHash: L.hash, remoteVersion: R.version }; // identical → adopt, no conflict
+      return;
+    }
+
+    const cp = safeVaultPath(conflictPath(path, this.stamp()));
+    if (R.mtime !== undefined && R.mtime > L.mtime) {
+      // Remote is newer: it becomes canonical; back up the older local copy first.
+      await this.local.write(cp, await this.local.read(path));
+      await this.local.write(safeVaultPath(path), remotePlain);
+      state[path] = { localHash: remoteHash, remoteVersion: R.version };
+      report.downloaded.push(path);
+      report.conflicts.push({ path, conflictPath: cp });
+    } else {
+      // Local is newer (or remote mtime unknown): local wins; back up the older remote copy.
+      await this.local.write(cp, remotePlain);
+      report.conflicts.push({ path, conflictPath: cp });
+      await this.upload(path, L, state, report);
+    }
   }
 
   private async upload(path: string, L: LocalFile, state: SyncStateData, report: SyncReport): Promise<void> {
