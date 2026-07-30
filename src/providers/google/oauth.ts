@@ -6,30 +6,23 @@ import { HttpSend } from "../RemoteProvider";
  * exchange/refresh is provider-specific; only the requested *scope* differs, and
  * scopes live with their provider (`driveScope`, `gcsOAuthScope`). A client
  * secret is sent only when the OAuth client requires one at token exchange
- * (Google's "Web"/"Desktop" clients do, even with PKCE); for an installed
- * (Desktop) app Google treats that secret as non-confidential.
+ * (Google's "Web"/"Desktop" clients do, even with PKCE).
+ *
+ * There is deliberately NO built-in OAuth client here. Shipping one would mean
+ * embedding a live client secret in the released main.js: Google requires
+ * `client_secret` at the token endpoint for Desktop clients, so a bundled
+ * one-click client cannot work without it. That has two costs we are not willing
+ * to pay — the credential is distributed to every user (it cannot be un-published
+ * once released, and the maintainer's Cloud project carries the abuse and quota
+ * risk), and injecting it at build time makes the released bundle impossible to
+ * reproduce from source, which is exactly what provenance checks look for.
+ *
+ * Instead each user supplies their own OAuth client (Settings → the backend's
+ * "OAuth client" rows). The credential then lives only in that user's local
+ * data.json, and every build of this plugin is byte-reproducible from source.
  */
 const AUTH_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
-
-/**
- * Built-in OAuth client id for the one-click "Connect" buttons (a Desktop OAuth
- * client). The id is public by design, so embedding it is safe; the matching
- * secret is injected at build time (see BUILTIN_OAUTH_CLIENT_SECRET). Users can
- * override it with their own client id under "Advanced".
- */
-export const BUILTIN_OAUTH_CLIENT_ID = "941838331259-g9ib1fukco8eqntbqagdqo8jsp2ha7l6.apps.googleusercontent.com";
-
-/**
- * Built-in client secret, INJECTED AT BUILD TIME from the GSYNC_BUILTIN_SECRET
- * env var (esbuild.config.mjs `define`). This keeps the secret in the released
- * main.js — so end users get one-click with no setup — while it never lives in
- * the source repo (GitHub push protection blocks committing OAuth secrets). For
- * an installed (Desktop) app the secret is non-confidential, so shipping it in
- * the bundle is fine (the rclone model). Empty in dev/test builds; users can
- * override it with their own under "Advanced".
- */
-export const BUILTIN_OAUTH_CLIENT_SECRET = process.env.GSYNC_BUILTIN_SECRET || "";
 
 export interface TokenSet {
   accessToken: string;

@@ -7,6 +7,26 @@
  */
 import GoogleSyncPlugin from "../src/main";
 import { SyncController } from "../src/SyncController";
+import { Setting, SettingGroup } from "obsidian";
+
+/** The shape of a declarative setting definition, as far as this test inspects it. */
+interface SettingDef {
+  name?: string;
+  heading?: string;
+  visible?: boolean | (() => boolean);
+  control?: { type: string; key: string };
+  render?: (setting: Setting, group: SettingGroup) => void | (() => void);
+  items?: SettingDef[];
+}
+
+/** What a walk of the definition tree observed. */
+interface Walked {
+  headings: string[];
+  controls: string[];
+  rendered: number;
+  hidden: number;
+}
+const fresh = (): Walked => ({ headings: [], controls: [], rendered: 0, hidden: 0 });
 
 // Obsidian runs in a browser/Electron renderer; provide the globals the plugin uses.
 (globalThis as unknown as { window: unknown }).window = {
@@ -72,31 +92,128 @@ async function main(): Promise<void> {
   check("registers a ribbon + a settings tab", plugin._ribbons.length === 1 && plugin._settingTabs.length === 1);
   check("registers vault events for on-change auto-sync", plugin._events.length >= 3);
 
-  let displayOk = true;
-  try {
-    plugin._settingTabs[0].display();
-  } catch (e) {
-    displayOk = false;
-    console.log("    display threw:", (e as Error).message);
-  }
-  check("settings tab display() builds the full UI without throwing", displayOk);
+  // ---- declarative settings (Obsidian 1.13+) ----
+  // The tab no longer implements display(); it returns definitions and the
+  // framework renders them. So walk the returned tree the way Obsidian would:
+  // evaluate every `visible` predicate, read every bound control value, and run
+  // every `render` callback. Calling display() here would prove nothing — the
+  // base-class method is a no-op.
+  const tab = plugin._settingTabs[0] as {
+    getSettingDefinitions: () => SettingDef[];
+    getControlValue: (k: string) => unknown;
+    setControlValue: (k: string, v: unknown) => void | Promise<void>;
+  };
 
-  let displayFullOk = true;
+  const walk = (items: SettingDef[], seen: Walked): Walked => {
+    for (const item of items) {
+      if (typeof item.visible === "function" && !item.visible()) {
+        seen.hidden++;
+        continue;
+      }
+      if (item.heading) seen.headings.push(item.heading);
+      if (item.control) {
+        seen.controls.push(item.control.key);
+        tab.getControlValue(item.control.key); // must not throw
+      }
+      if (item.render) {
+        item.render(new Setting(), new SettingGroup());
+        seen.rendered++;
+      }
+      if (item.items) walk(item.items, seen);
+    }
+    return seen;
+  };
+
+  let defsOk = true;
+  let collapsed: Walked = fresh();
+  try {
+    collapsed = walk(tab.getSettingDefinitions(), fresh());
+  } catch (e) {
+    defsOk = false;
+    console.log("    getSettingDefinitions walk threw:", (e as Error).message);
+  }
+  check("settings definitions build + render with no backend enabled", defsOk);
+  console.log(
+    `    collapsed: ${collapsed.controls.length} controls, ${collapsed.rendered} render rows, ` +
+      `${collapsed.hidden} hidden, headings=[${collapsed.headings.join(", ")}]`
+  );
+  // Guards the walk itself: an empty definition tree would satisfy every
+  // assertion below by vacuous truth, so require it to be substantial.
+  check(
+    "the walk actually visited a substantial tree",
+    collapsed.controls.length >= 5 && collapsed.rendered >= 2 && collapsed.headings.length >= 3
+  );
+  check(
+    "plugin name is not used as a settings heading",
+    collapsed.headings.length > 0 && !collapsed.headings.some((h) => h.toLowerCase() === "google sync")
+  );
+
+  let expandedOk = true;
+  let expanded: Walked = fresh();
   try {
     plugin.settings.driveEnabled = true;
     plugin.settings.gcsEnabled = true;
     plugin.settings.driveToken = { enc: false, data: "d" };
     plugin.settings.gcsToken = { enc: false, data: "g" };
-    plugin._settingTabs[0].display(); // both backends + Advanced <details> + Disconnect buttons
+    plugin.settings.autoSync = true;
+    expanded = walk(tab.getSettingDefinitions(), fresh()); // both backends + advanced pages + disconnect
     plugin.settings.driveEnabled = false;
     plugin.settings.gcsEnabled = false;
     plugin.settings.driveToken = null;
     plugin.settings.gcsToken = null;
+    plugin.settings.autoSync = false;
   } catch (e) {
-    displayFullOk = false;
-    console.log("    full display threw:", (e as Error).message);
+    expandedOk = false;
+    console.log("    expanded walk threw:", (e as Error).message);
   }
-  check("settings tab display() builds both backends + advanced + disconnect without throwing", displayFullOk);
+  check("settings definitions build + render with both backends connected", expandedOk);
+  console.log(
+    `    expanded:  ${expanded.controls.length} controls, ${expanded.rendered} render rows, ` +
+      `${expanded.hidden} hidden, headings=[${expanded.headings.join(", ")}]`
+  );
+  check(
+    "enabling a backend reveals more rows than it hides",
+    expanded.controls.length > collapsed.controls.length && expanded.rendered > collapsed.rendered
+  );
+  check(
+    "every bound control key exists in settings",
+    expanded.controls.length > 0 && expanded.controls.every((k) => k in plugin.settings)
+  );
+
+  // Writing through the declarative binding must persist and stay typed.
+  let bindOk = true;
+  try {
+    await tab.setControlValue("syncFolder", "  Notes/Sub  ");
+    await tab.setControlValue("autoSyncIntervalMinutes", 42);
+    await tab.setControlValue("driveScopeLevel", "full");
+  } catch (e) {
+    bindOk = false;
+    console.log("    setControlValue threw:", (e as Error).message);
+  }
+  check(
+    "setControlValue writes, trims and coerces",
+    bindOk &&
+      plugin.settings.syncFolder === "Notes/Sub" &&
+      plugin.settings.autoSyncIntervalMinutes === 42 &&
+      plugin.settings.driveScopeLevel === "full"
+  );
+  // A blank folder name must fall back to the default, not persist as "".
+  await tab.setControlValue("appFolderName", "   ");
+  check("blank folder name falls back to the default", plugin.settings.appFolderName === "Obsidian Sync");
+  plugin.settings.syncFolder = "";
+  plugin.settings.driveScopeLevel = "file";
+
+  // No credential may be baked into the build any more.
+  check(
+    "no OAuth client is bundled — the user supplies their own",
+    plugin.controller.hasOAuthClient === false && plugin.settings.oauthClientId === ""
+  );
+  plugin.settings.driveToken = { enc: false, data: "legacy" };
+  check(
+    "a legacy token with no client id asks the user to reconnect",
+    plugin.controller.needsReconnectForOwnClient === true
+  );
+  plugin.settings.driveToken = null;
 
   // ---- credentials: passphrase is OPTIONAL ----
   plugin.settings.gcsEnabled = true;

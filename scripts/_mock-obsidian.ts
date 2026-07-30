@@ -26,10 +26,11 @@ class Component {
   onClick() { return this; }
   setDisabled() { return this; }
   setWarning() { return this; }
+  setDestructive() { return this; }
 }
 
 export class Setting {
-  constructor(_containerEl: unknown) {}
+  constructor(_containerEl?: unknown) {}
   setName() { return this; }
   setDesc() { return this; }
   setHeading() { return this; }
@@ -39,18 +40,60 @@ export class Setting {
   addButton(cb: (c: Component) => void) { cb(new Component()); return this; }
 }
 
+export class SettingGroup {}
+
 function makeEl(): Record<string, unknown> {
-  return { empty() {}, createEl() { return makeEl(); }, createDiv() { return makeEl(); }, setText() {}, appendChild() {} };
+  return { empty() {}, createEl() { return makeEl(); }, createDiv() { return makeEl(); }, setText() {}, appendChild() {}, appendText() {} };
+}
+
+/**
+ * `createFragment` is an Obsidian *global*, not a module export — plugin code
+ * calls it unqualified, so it has to exist on globalThis for the headless run.
+ * Installed as a module side effect so every test that aliases `obsidian` to
+ * this mock gets it.
+ */
+(globalThis as unknown as { createFragment: (cb?: (el: unknown) => void) => unknown }).createFragment = (cb) => {
+  const frag = makeEl();
+  if (cb) cb(frag);
+  return frag;
+};
+
+/** A setting definition as the declarative API shapes it (only what tests touch). */
+export interface MockSettingDefinition {
+  name?: string;
+  desc?: unknown;
+  heading?: string;
+  type?: string;
+  visible?: boolean | (() => boolean);
+  control?: { type: string; key: string };
+  action?: (index: number) => void;
+  render?: (setting: Setting, group: SettingGroup) => void | (() => void);
+  items?: MockSettingDefinition[];
 }
 
 export class PluginSettingTab {
   app: unknown;
-  plugin: unknown;
+  plugin: { settings?: Record<string, unknown>; saveSettings?: () => Promise<void> };
   containerEl: unknown;
+  settingItems: MockSettingDefinition[] = [];
   constructor(app: unknown, plugin: unknown) {
     this.app = app;
-    this.plugin = plugin;
+    this.plugin = plugin as PluginSettingTab["plugin"];
     this.containerEl = makeEl();
+  }
+  /** Overridden by plugins on 1.13+; the base returns nothing. */
+  getSettingDefinitions(): MockSettingDefinition[] {
+    return [];
+  }
+  /** Real Obsidian reads from `plugin.settings`; mirror that so unoverridden keys work. */
+  getControlValue(key: string): unknown {
+    return this.plugin.settings?.[key];
+  }
+  setControlValue(key: string, value: unknown): void | Promise<void> {
+    if (this.plugin.settings) this.plugin.settings[key] = value;
+  }
+  update(): void {
+    this.settingItems = this.getSettingDefinitions();
   }
   display() {}
   hide() {}
@@ -83,3 +126,7 @@ export class Plugin {
 export interface TFile {
   path: string;
 }
+
+/** Type-only aliases so the plugin's `import type` names resolve against the mock. */
+export type SettingDefinitionItem = MockSettingDefinition;
+export type SettingDefinitionRender = MockSettingDefinition;

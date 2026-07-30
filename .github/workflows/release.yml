@@ -1,0 +1,74 @@
+name: Release
+
+# Builds the release assets in CI and signs them with build provenance, so the
+# published main.js is verifiably the output of this repository at this tag.
+# Nothing is injected at build time, so `npm ci && npm run build` at a tag
+# reproduces the published main.js byte for byte — that is what makes the
+# attestation meaningful rather than decorative.
+on:
+  push:
+    tags:
+      - "*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build and attach assets to"
+        required: true
+
+permissions:
+  contents: write # create the release and upload assets
+  id-token: write # OIDC token used to sign the provenance
+  attestations: write # record the attestation
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # `npm ci` (not `install`) so the committed lockfile decides every version.
+      - run: npm ci
+
+      - name: Verify manifest version matches the tag
+        run: |
+          TAG="${{ inputs.tag || github.ref_name }}"
+          MANIFEST=$(node -p "require('./manifest.json').version")
+          PKG=$(node -p "require('./package.json').version")
+          echo "tag=$TAG manifest=$MANIFEST package=$PKG"
+          if [ "$TAG" != "$MANIFEST" ] || [ "$TAG" != "$PKG" ]; then
+            echo "::error::Tag, manifest.json and package.json versions must all match."
+            exit 1
+          fi
+          if [ "$(node -p "require('./versions.json')['$TAG'] || ''")" = "" ]; then
+            echo "::error::versions.json has no entry for $TAG."
+            exit 1
+          fi
+
+      - run: npm run build
+
+      - name: Report asset digests
+        run: sha256sum main.js manifest.json styles.css
+
+      # Proves these exact bytes came from this repo, this workflow, this commit.
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            main.js
+            manifest.json
+            styles.css
+
+      - name: Attach assets to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          gh release view "$TAG" >/dev/null 2>&1 \
+            || gh release create "$TAG" --title "$TAG" --generate-notes
+          gh release upload "$TAG" main.js manifest.json styles.css --clobber

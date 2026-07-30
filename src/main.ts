@@ -1,4 +1,4 @@
-import { App, Notice, Plugin, PluginSettingTab, Setting, debounce } from "obsidian";
+import { App, Notice, Plugin, PluginSettingTab, SettingDefinitionItem, SettingDefinitionRender, debounce } from "obsidian";
 import { DEFAULT_APP_FOLDER, DEFAULT_SETTINGS, GoogleSyncSettings } from "./settings";
 import { SyncController } from "./SyncController";
 import { relativeTime } from "./util/time";
@@ -108,7 +108,43 @@ export default class GoogleSyncPlugin extends Plugin {
   }
 }
 
+/** Settings keys bound to a declarative control, i.e. read/written by name. */
+type ControlKey =
+  | "driveEnabled"
+  | "appFolderName"
+  | "driveProtectLocal"
+  | "driveScopeLevel"
+  | "gcsEnabled"
+  | "bucket"
+  | "prefix"
+  | "gcsProtectLocal"
+  | "region"
+  | "service"
+  | "oauthClientId"
+  | "syncFolder"
+  | "autoSync"
+  | "autoSyncMode"
+  | "autoSyncIntervalMinutes"
+  | "e2ee";
+
+const asString = (v: unknown): string => (typeof v === "string" ? v : "");
+const asBoolean = (v: unknown): boolean => v === true;
+
+/**
+ * Declarative settings (Obsidian 1.13+). Returning definitions instead of
+ * painting `containerEl` by hand is what puts every row into Obsidian's settings
+ * search; the framework owns rendering, so `display()` is not implemented here.
+ *
+ * Rows that need something the control types don't express — a masked input, or
+ * buttons with explicit CTA/destructive styling — use `render`, which still
+ * contributes its name and description to search.
+ */
 class GoogleSyncSettingTab extends PluginSettingTab {
+  /** Typed into the UI and handed straight to the controller; never persisted here. */
+  private hmacAccessId = "";
+  private hmacSecret = "";
+  private passphrase = "";
+
   constructor(app: App, private readonly plugin: GoogleSyncPlugin) {
     super(app, plugin);
   }
@@ -123,294 +159,476 @@ class GoogleSyncSettingTab extends PluginSettingTab {
     run.then(
       () => {
         this.notify(`${which === "drive" ? "Google Drive" : "Google Cloud"} connected.`);
-        this.display();
+        this.update();
       },
-      (e) => this.notify((e as Error).message)
+      (e: unknown) => this.notify(e instanceof Error ? e.message : String(e))
     );
   }
 
-  display(): void {
-    const { containerEl } = this;
+  // ---------------------------------------------------------------- bindings
+
+  getControlValue(key: string): unknown {
+    const s = this.plugin.settings;
+    switch (key as ControlKey) {
+      // Blank means "use the default", so show blank rather than echoing the
+      // default back — the placeholder carries the hint instead.
+      case "appFolderName":
+        return s.appFolderName === DEFAULT_APP_FOLDER ? "" : s.appFolderName;
+      default:
+        return s[key as ControlKey];
+    }
+  }
+
+  async setControlValue(key: string, value: unknown): Promise<void> {
+    const s = this.plugin.settings;
+    switch (key as ControlKey) {
+      case "appFolderName":
+        s.appFolderName = asString(value).trim() || DEFAULT_APP_FOLDER;
+        break;
+      case "oauthClientId":
+        s.oauthClientId = asString(value).trim();
+        break;
+      case "bucket":
+        s.bucket = asString(value).trim();
+        break;
+      case "prefix":
+        s.prefix = asString(value).trim();
+        break;
+      case "syncFolder":
+        s.syncFolder = asString(value).trim();
+        break;
+      case "region":
+        s.region = asString(value).trim();
+        break;
+      case "service":
+        s.service = asString(value).trim();
+        break;
+      case "driveScopeLevel":
+        s.driveScopeLevel = asString(value) === "full" ? "full" : "file";
+        break;
+      case "autoSyncMode":
+        s.autoSyncMode = asString(value) === "on-change" ? "on-change" : "interval";
+        break;
+      case "autoSyncIntervalMinutes":
+        s.autoSyncIntervalMinutes = typeof value === "number" && value > 0 ? Math.floor(value) : s.autoSyncIntervalMinutes;
+        break;
+      case "driveEnabled":
+        s.driveEnabled = asBoolean(value);
+        break;
+      case "gcsEnabled":
+        s.gcsEnabled = asBoolean(value);
+        break;
+      case "driveProtectLocal":
+        s.driveProtectLocal = asBoolean(value);
+        break;
+      case "gcsProtectLocal":
+        s.gcsProtectLocal = asBoolean(value);
+        break;
+      case "autoSync":
+        s.autoSync = asBoolean(value);
+        break;
+      case "e2ee":
+        s.e2ee = asBoolean(value);
+        break;
+    }
+    await this.plugin.saveSettings();
+
+    // Side effects the framework can't know about: reschedule the timer, and
+    // repaint when a toggle reveals or hides a whole section.
+    if (key === "autoSync" || key === "autoSyncMode" || key === "autoSyncIntervalMinutes") this.plugin.applyAutoSync();
+    if (key === "driveEnabled" || key === "gcsEnabled") this.update();
+  }
+
+  // ------------------------------------------------------------ row helpers
+
+  /** A row of explicit buttons, so CTA / destructive styling stays under our control. */
+  private buttonRow(
+    name: string,
+    desc: string | DocumentFragment,
+    buttons: { label: string; cta?: boolean; destructive?: boolean; onClick: () => void }[]
+  ): SettingDefinitionRender {
+    return {
+      name,
+      desc,
+      render: (setting) => {
+        for (const spec of buttons) {
+          setting.addButton((b) => {
+            b.setButtonText(spec.label).onClick(spec.onClick);
+            if (spec.cta) b.setCta();
+            if (spec.destructive) b.setDestructive();
+          });
+        }
+      },
+    };
+  }
+
+  /** A masked text row — no control type covers `input[type=password]`. */
+  private passwordRow(
+    name: string,
+    desc: string,
+    read: () => string,
+    write: (value: string) => void
+  ): SettingDefinitionRender {
+    return {
+      name,
+      desc,
+      render: (setting) => {
+        setting.addText((t) => {
+          t.inputEl.type = "password";
+          t.setValue(read()).onChange(write);
+        });
+      },
+    };
+  }
+
+  // ------------------------------------------------------------ definitions
+
+  getSettingDefinitions(): SettingDefinitionItem[] {
+    return [
+      this.reconnectNotice(),
+      this.oauthClientGroup(),
+      this.driveGroup(),
+      this.gcsGroup(),
+      this.syncGroup(),
+      this.encryptionPage(),
+    ];
+  }
+
+  /**
+   * Versions before 0.7.0 shipped a shared OAuth client. Google binds a refresh
+   * token to the client that issued it, so those tokens cannot be refreshed once
+   * that client is gone — the only fix is to reconnect with the user's own client.
+   * Stated up front rather than surfacing later as a failed sync.
+   */
+  private reconnectNotice(): SettingDefinitionItem {
+    return {
+      type: "group",
+      heading: "Reconnect required",
+      visible: () => this.plugin.controller.needsReconnectForOwnClient,
+      items: [
+        {
+          name: "This version uses your own Google OAuth client",
+          desc:
+            "Earlier versions signed in through a shared client that was bundled into the plugin. That client has been removed, so your existing sign-in can no longer be refreshed. " +
+            "Create your own OAuth client below, then reconnect the backends you use. Your synced files are untouched.",
+        },
+      ],
+    };
+  }
+
+  private oauthClientGroup(): SettingDefinitionItem {
+    const s = this.plugin.settings;
+    const configured = this.plugin.controller.hasOAuthClient;
+    return {
+      type: "group",
+      heading: "Google OAuth client",
+      items: [
+        {
+          name: configured ? "Client configured" : "Set up required",
+          desc: createFragment((f) => {
+            f.appendText(
+              configured
+                ? "Signing in uses your own Google OAuth client. Nothing is shared with anyone else."
+                : "This plugin talks to Google with an OAuth client that you own — no shared credential ships in the plugin, so nothing to leak and nothing to revoke on your behalf. Create one once: "
+            );
+            if (!configured) {
+              const ol = f.createEl("ol");
+              ol.createEl("li", { text: "Open the Google Cloud Console credentials page and pick (or create) a project." });
+              ol.createEl("li", { text: 'Enable the "Google Drive API" if you plan to sync to Drive.' });
+              ol.createEl("li", { text: 'Create credentials → OAuth client ID → application type "Desktop app".' });
+              ol.createEl("li", { text: "Paste the client ID and client secret into the two rows below." });
+              f.createEl("a", {
+                text: "console.cloud.google.com/apis/credentials",
+                href: "https://console.cloud.google.com/apis/credentials",
+              });
+            }
+          }),
+        },
+        {
+          name: "OAuth client ID",
+          desc: "The client ID from your Google Cloud OAuth client.",
+          aliases: ["google", "credentials", "sign in", "login"],
+          control: {
+            type: "text",
+            key: "oauthClientId",
+            placeholder: "…apps.googleusercontent.com",
+          },
+        },
+        this.passwordRow(
+          "OAuth client secret",
+          'Required for Google "Desktop app" clients. Stored only in this vault\'s plugin data, which is never synced.',
+          () => s.oauthClientSecret,
+          (v) => {
+            s.oauthClientSecret = v.trim();
+            void this.plugin.saveSettings();
+          }
+        ),
+      ],
+    };
+  }
+
+  private driveGroup(): SettingDefinitionItem {
     const s = this.plugin.settings;
     const c = this.plugin.controller;
-    containerEl.empty();
-
-    new Setting(containerEl).setName("Google Sync").setHeading();
-    if (!s.driveEnabled && !s.gcsEnabled) {
-      containerEl.createEl("p", { text: "Turn on a backend below to get started. You can use Google Drive, Google Cloud Storage, or both at once." });
-    }
-
-    // ---------------- Google Drive ----------------
-    new Setting(containerEl)
-      .setName("Google Drive")
-      .setDesc("Sync to your personal Google Drive. Works with any Google account — just sign in.")
-      .addToggle((t) =>
-        t.setValue(s.driveEnabled).onChange(async (v) => {
-          s.driveEnabled = v;
-          await this.plugin.saveSettings();
-          this.display();
-        })
-      );
-    if (s.driveEnabled) {
-      new Setting(containerEl)
-        .setName("Folder")
-        .setDesc(`Files sync under "${s.appFolderName || DEFAULT_APP_FOLDER}/${this.app.vault.getName()}" — the vault name is added automatically so multiple vaults never collide. Blank = "${DEFAULT_APP_FOLDER}".`)
-        .addText((t) =>
-          t
-            .setPlaceholder(DEFAULT_APP_FOLDER)
-            .setValue(s.appFolderName === DEFAULT_APP_FOLDER ? "" : s.appFolderName)
-            .onChange(async (v) => {
-              s.appFolderName = v.trim() || DEFAULT_APP_FOLDER;
-              await this.plugin.saveSettings();
-            })
-        );
-      const drow = new Setting(containerEl)
-        .setDesc(
-          s.driveToken
-            ? `✓ Connected.${s.backendLastSync.drive ? ` Last synced ${relativeTime(s.backendLastSync.drive, Date.now())}.` : ""}`
-            : "Not connected."
-        )
-        .addButton((b) => b.setButtonText(s.driveToken ? "Reconnect" : "Connect Google Drive").setCta().onClick(() => this.connect("drive")));
-      if (s.driveToken)
-        drow.addButton((b) =>
-          b.setButtonText("Disconnect").setWarning().onClick(async () => {
-            await c.disconnectDrive();
+    const status = s.driveToken
+      ? `✓ Connected.${s.backendLastSync.drive ? ` Last synced ${relativeTime(s.backendLastSync.drive, Date.now())}.` : ""}`
+      : "Not connected.";
+    const buttons: { label: string; cta?: boolean; destructive?: boolean; onClick: () => void }[] = [
+      { label: s.driveToken ? "Reconnect" : "Connect Google Drive", cta: true, onClick: () => this.connect("drive") },
+    ];
+    if (s.driveToken) {
+      buttons.push({
+        label: "Disconnect",
+        destructive: true,
+        onClick: () => {
+          void c.disconnectDrive().then(() => {
             this.notify("Google Drive disconnected.");
-            this.display();
-          })
-        );
-      new Setting(containerEl)
-        .setName("Backup mode (never delete local files)")
-        .setDesc("Off (default): a true two-way sync — deletions sync across devices, but are recoverable (moved to your trash) and a mass deletion is halted for safety. On: a file missing on Drive is re-uploaded instead of deleted locally — choose this only for a one-way single-device → Drive backup.")
-        .addToggle((t) =>
-          t.setValue(s.driveProtectLocal).onChange(async (v) => {
-            s.driveProtectLocal = v;
-            await this.plugin.saveSettings();
-          })
-        );
-      const dadv = containerEl.createEl("details");
-      dadv.createEl("summary", { text: "Advanced" });
-      new Setting(dadv)
-        .setName("Scope")
-        .setDesc("App files (drive.file) is least-privilege and needs no Google verification. Full Drive can target existing folders.")
-        .addDropdown((d) =>
-          d
-            .addOption("file", "App files (recommended)")
-            .addOption("full", "Full Drive")
-            .setValue(s.driveScopeLevel)
-            .onChange(async (v) => {
-              s.driveScopeLevel = v as GoogleSyncSettings["driveScopeLevel"];
-              await this.plugin.saveSettings();
-            })
-        );
-      new Setting(dadv)
-        .setName("OAuth client ID (optional)")
-        .setDesc("Use your own Google OAuth client instead of the built-in one.")
-        .addText((t) =>
-          t.setValue(s.oauthClientId).onChange(async (v) => {
-            s.oauthClientId = v.trim();
-            await this.plugin.saveSettings();
-          })
-        );
-      new Setting(dadv)
-        .setName("OAuth client secret (optional)")
-        .setDesc("Only if your OAuth client requires one (Google 'Desktop'/'Web' clients do). For a Desktop app it is non-confidential.")
-        .addText((t) => {
-          t.inputEl.type = "password";
-          t.setValue(s.oauthClientSecret).onChange(async (v) => {
-            s.oauthClientSecret = v.trim();
-            await this.plugin.saveSettings();
+            this.update();
           });
-        });
+        },
+      });
     }
 
-    // ---------------- Google Cloud Storage ----------------
-    new Setting(containerEl)
-      .setName("Google Cloud Storage")
-      .setDesc("Sync to a bucket in your own Google Cloud project (requires a Google Cloud account).")
-      .addToggle((t) =>
-        t.setValue(s.gcsEnabled).onChange(async (v) => {
-          s.gcsEnabled = v;
-          await this.plugin.saveSettings();
-          this.display();
-        })
-      );
-    if (s.gcsEnabled) {
-      new Setting(containerEl).setName("Bucket").setDesc("Your Cloud Storage bucket name.").addText((t) =>
-        t.setValue(s.bucket).onChange(async (v) => {
-          s.bucket = v.trim();
-          await this.plugin.saveSettings();
-        })
-      );
-      new Setting(containerEl).setName("Prefix (optional)").setDesc("A key prefix inside the bucket.").addText((t) =>
-        t.setValue(s.prefix).onChange(async (v) => {
-          s.prefix = v.trim();
-          await this.plugin.saveSettings();
-        })
-      );
-      const gbase = s.gcsToken ? "✓ Connected (OAuth)." : s.gcsSecret ? "✓ Using an HMAC key." : "Not connected.";
-      const gstatus = (s.gcsToken || s.gcsSecret) && s.backendLastSync.gcs ? `${gbase} Last synced ${relativeTime(s.backendLastSync.gcs, Date.now())}.` : gbase;
-      const grow = new Setting(containerEl)
-        .setDesc(gstatus)
-        .addButton((b) => b.setButtonText(s.gcsToken ? "Reconnect" : "Connect Google Cloud").setCta().onClick(() => this.connect("gcs")));
-      if (s.gcsToken || s.gcsSecret)
-        grow.addButton((b) =>
-          b.setButtonText("Disconnect").setWarning().onClick(async () => {
-            await c.disconnectGcs();
+    return {
+      type: "group",
+      heading: "Google Drive",
+      items: [
+        {
+          name: "Sync to Google Drive",
+          desc: "Sync to your personal Google Drive. Works with any Google account.",
+          control: { type: "toggle", key: "driveEnabled" },
+        },
+        {
+          name: "Folder",
+          desc: `Files sync under "${s.appFolderName || DEFAULT_APP_FOLDER}/${this.app.vault.getName()}" — the vault name is added automatically so multiple vaults never collide. Blank = "${DEFAULT_APP_FOLDER}".`,
+          visible: () => s.driveEnabled,
+          control: { type: "text", key: "appFolderName", placeholder: DEFAULT_APP_FOLDER },
+        },
+        { ...this.buttonRow("Connection", status, buttons), visible: () => s.driveEnabled },
+        {
+          name: "Backup mode (never delete local files)",
+          desc: "Off (default): a true two-way sync — deletions sync across devices, but are recoverable (moved to your trash) and a mass deletion is halted for safety. On: a file missing on Drive is re-uploaded instead of deleted locally — choose this only for a one-way single-device → Drive backup.",
+          visible: () => s.driveEnabled,
+          control: { type: "toggle", key: "driveProtectLocal" },
+        },
+        {
+          type: "page",
+          name: "Advanced",
+          desc: "Drive access scope.",
+          visible: () => s.driveEnabled,
+          items: [
+            {
+              name: "Scope",
+              desc: "App files (drive.file) is least-privilege and needs no Google verification. Full Drive can target existing folders.",
+              control: {
+                type: "dropdown",
+                key: "driveScopeLevel",
+                options: { file: "App files (recommended)", full: "Full Drive" },
+              },
+            },
+          ],
+        },
+      ],
+    };
+  }
+
+  private gcsGroup(): SettingDefinitionItem {
+    const s = this.plugin.settings;
+    const c = this.plugin.controller;
+    const base = s.gcsToken ? "✓ Connected (OAuth)." : s.gcsSecret ? "✓ Using an HMAC key." : "Not connected.";
+    const status = (s.gcsToken || s.gcsSecret) && s.backendLastSync.gcs ? `${base} Last synced ${relativeTime(s.backendLastSync.gcs, Date.now())}.` : base;
+    const buttons: { label: string; cta?: boolean; destructive?: boolean; onClick: () => void }[] = [
+      { label: s.gcsToken ? "Reconnect" : "Connect Google Cloud", cta: true, onClick: () => this.connect("gcs") },
+    ];
+    if (s.gcsToken || s.gcsSecret) {
+      buttons.push({
+        label: "Disconnect",
+        destructive: true,
+        onClick: () => {
+          void c.disconnectGcs().then(() => {
             this.notify("Google Cloud disconnected.");
-            this.display();
-          })
-        );
-      new Setting(containerEl)
-        .setName("Backup mode (never delete local files)")
-        .setDesc("Off (default): a true two-way sync — deletions sync across devices, but are recoverable (moved to your trash) and a mass deletion is halted for safety. On: a file missing in the bucket is re-uploaded instead of deleted locally — choose this only for a one-way single-device → bucket backup.")
-        .addToggle((t) =>
-          t.setValue(s.gcsProtectLocal).onChange(async (v) => {
-            s.gcsProtectLocal = v;
-            await this.plugin.saveSettings();
-          })
-        );
-      const gadv = containerEl.createEl("details");
-      gadv.createEl("summary", { text: "Advanced — HMAC key (least privilege), region" });
-      gadv.createEl("p", {
-        text:
-          "OAuth grants read/write to every bucket your Google account can access (GCS has no per-bucket OAuth scope). " +
-          "For least privilege, use an HMAC key tied to a bucket-scoped service account instead.",
-      });
-      let accessId = s.accessId;
-      let secret = "";
-      new Setting(gadv).setName("HMAC Access ID").addText((t) => t.setValue(accessId).onChange((v) => (accessId = v)));
-      new Setting(gadv).setName("HMAC Secret").addText((t) => {
-        t.inputEl.type = "password";
-        t.onChange((v) => (secret = v));
-      });
-      new Setting(gadv).addButton((b) =>
-        b.setButtonText("Save HMAC key").onClick(async () => {
-          try {
-            await c.saveGcsCredentials(accessId, secret);
-            this.notify("HMAC key saved.");
-            this.display();
-          } catch (e) {
-            this.notify((e as Error).message);
-          }
-        })
-      );
-      new Setting(gadv)
-        .setName("Region / service")
-        .setDesc("SigV4 credential scope. Defaults: auto / s3.")
-        .addText((t) =>
-          t.setPlaceholder("auto").setValue(s.region).onChange(async (v) => {
-            s.region = v.trim();
-            await this.plugin.saveSettings();
-          })
-        )
-        .addText((t) =>
-          t.setPlaceholder("s3").setValue(s.service).onChange(async (v) => {
-            s.service = v.trim();
-            await this.plugin.saveSettings();
-          })
-        );
-      new Setting(gadv)
-        .setName("OAuth client ID (optional)")
-        .setDesc("Use your own Google OAuth client instead of the built-in one.")
-        .addText((t) =>
-          t.setValue(s.oauthClientId).onChange(async (v) => {
-            s.oauthClientId = v.trim();
-            await this.plugin.saveSettings();
-          })
-        );
-      new Setting(gadv)
-        .setName("OAuth client secret (optional)")
-        .setDesc("Only if your OAuth client requires one. For a Desktop app it is non-confidential.")
-        .addText((t) => {
-          t.inputEl.type = "password";
-          t.setValue(s.oauthClientSecret).onChange(async (v) => {
-            s.oauthClientSecret = v.trim();
-            await this.plugin.saveSettings();
+            this.update();
           });
-        });
+        },
+      });
     }
 
-    // ---------------- Sync behaviour ----------------
-    new Setting(containerEl).setName("Sync").setHeading();
-    new Setting(containerEl)
-      .setName("Sync now")
-      .setDesc(`Last synced: ${s.lastSyncAt ? `${relativeTime(s.lastSyncAt, Date.now())} (${new Date(s.lastSyncAt).toLocaleString()})` : "never"}`)
-      .addButton((b) =>
-        b
-          .setButtonText("Sync now")
-          .setCta()
-          .onClick(async () => {
-            await this.plugin.runSync();
-            this.display();
-          })
-      );
-    new Setting(containerEl)
-      .setName("Sync folder")
-      .setDesc("Vault-relative folder to sync. Empty = whole vault.")
-      .addText((t) =>
-        t.setValue(s.syncFolder).onChange(async (v) => {
-          s.syncFolder = v.trim();
-          await this.plugin.saveSettings();
-        })
-      );
-    new Setting(containerEl).setName("Auto-sync").addToggle((t) =>
-      t.setValue(s.autoSync).onChange(async (v) => {
-        s.autoSync = v;
-        await this.plugin.saveSettings();
-        this.plugin.applyAutoSync();
-      })
-    );
-    new Setting(containerEl).setName("Auto-sync mode").addDropdown((d) =>
-      d
-        .addOption("interval", "Every X minutes")
-        .addOption("on-change", "On every change")
-        .setValue(s.autoSyncMode)
-        .onChange(async (v) => {
-          s.autoSyncMode = v as GoogleSyncSettings["autoSyncMode"];
-          await this.plugin.saveSettings();
-          this.plugin.applyAutoSync();
-        })
-    );
-    new Setting(containerEl).setName("Auto-sync interval (minutes)").addText((t) =>
-      t.setValue(String(s.autoSyncIntervalMinutes)).onChange(async (v) => {
-        const n = parseInt(v, 10);
-        if (!Number.isNaN(n) && n > 0) {
-          s.autoSyncIntervalMinutes = n;
-          await this.plugin.saveSettings();
-          this.plugin.applyAutoSync();
-        }
-      })
-    );
+    return {
+      type: "group",
+      heading: "Google Cloud Storage",
+      items: [
+        {
+          name: "Sync to Google Cloud Storage",
+          desc: "Sync to a bucket in your own Google Cloud project (requires a Google Cloud account).",
+          control: { type: "toggle", key: "gcsEnabled" },
+        },
+        {
+          name: "Bucket",
+          desc: "Your Cloud Storage bucket name.",
+          visible: () => s.gcsEnabled,
+          control: { type: "text", key: "bucket" },
+        },
+        {
+          name: "Prefix",
+          desc: "Optional key prefix inside the bucket.",
+          visible: () => s.gcsEnabled,
+          control: { type: "text", key: "prefix" },
+        },
+        { ...this.buttonRow("Connection", status, buttons), visible: () => s.gcsEnabled },
+        {
+          name: "Backup mode (never delete local files)",
+          desc: "Off (default): a true two-way sync — deletions sync across devices, but are recoverable (moved to your trash) and a mass deletion is halted for safety. On: a file missing in the bucket is re-uploaded instead of deleted locally — choose this only for a one-way single-device → bucket backup.",
+          visible: () => s.gcsEnabled,
+          control: { type: "toggle", key: "gcsProtectLocal" },
+        },
+        {
+          type: "page",
+          name: "Advanced",
+          desc: "HMAC key (least privilege), region and service.",
+          visible: () => s.gcsEnabled,
+          items: [
+            {
+              name: "Why use an HMAC key",
+              desc:
+                "OAuth grants read/write to every bucket your Google account can access (GCS has no per-bucket OAuth scope). " +
+                "For least privilege, use an HMAC key tied to a bucket-scoped service account instead.",
+            },
+            {
+              name: "HMAC access ID",
+              desc: "The access ID of your bucket-scoped service account's HMAC key.",
+              render: (setting) => {
+                setting.addText((t) => t.setValue(this.hmacAccessId || s.accessId).onChange((v) => (this.hmacAccessId = v)));
+              },
+            },
+            this.passwordRow(
+              "HMAC secret",
+              "Held in memory until you save it below.",
+              () => "",
+              (v) => (this.hmacSecret = v)
+            ),
+            this.buttonRow("Save HMAC key", "Switches this backend to HMAC authentication.", [
+              {
+                label: "Save HMAC key",
+                onClick: () => {
+                  void c.saveGcsCredentials(this.hmacAccessId || s.accessId, this.hmacSecret).then(
+                    () => {
+                      this.hmacSecret = "";
+                      this.notify("HMAC key saved.");
+                      this.update();
+                    },
+                    (e: unknown) => this.notify(e instanceof Error ? e.message : String(e))
+                  );
+                },
+              },
+            ]),
+            {
+              name: "Region",
+              desc: "SigV4 credential scope. Default: auto.",
+              control: { type: "text", key: "region", placeholder: "auto" },
+            },
+            {
+              name: "Service",
+              desc: "SigV4 service name. Default: s3.",
+              control: { type: "text", key: "service", placeholder: "s3" },
+            },
+          ],
+        },
+      ],
+    };
+  }
 
-    // ---------------- Advanced: end-to-end encryption ----------------
-    const enc = containerEl.createEl("details");
-    enc.createEl("summary", { text: "Advanced: end-to-end encryption" });
-    enc.createEl("p", {
-      text:
-        "Optional. Encrypts note content before upload (zero-knowledge) using a passphrase — off by default, and not needed just to connect. " +
-        "If you lose the passphrase, encrypted content is unrecoverable.",
-    });
-    new Setting(enc).setName("Encrypt content (E2EE)").addToggle((t) =>
-      t.setValue(s.e2ee).onChange(async (v) => {
-        s.e2ee = v;
-        await this.plugin.saveSettings();
-      })
-    );
-    let passphrase = "";
-    new Setting(enc).setName("Passphrase").addText((t) => {
-      t.inputEl.type = "password";
-      t.onChange((v) => (passphrase = v));
-    });
-    new Setting(enc).addButton((b) =>
-      b.setButtonText("Unlock").onClick(async () => {
-        try {
-          await c.prepare(passphrase || undefined);
-          this.notify(c.ready ? "unlocked." : "nothing to unlock yet.");
-        } catch (e) {
-          this.notify((e as Error).message);
-        }
-      })
-    );
+  private syncGroup(): SettingDefinitionItem {
+    const s = this.plugin.settings;
+    return {
+      type: "group",
+      heading: "Sync",
+      items: [
+        this.buttonRow(
+          "Sync now",
+          `Last synced: ${s.lastSyncAt ? `${relativeTime(s.lastSyncAt, Date.now())} (${new Date(s.lastSyncAt).toLocaleString()})` : "never"}`,
+          [
+            {
+              label: "Sync now",
+              cta: true,
+              onClick: () => {
+                void this.plugin.runSync().then(() => this.update());
+              },
+            },
+          ]
+        ),
+        {
+          name: "Sync folder",
+          desc: "Vault-relative folder to sync. Empty = whole vault.",
+          control: { type: "text", key: "syncFolder" },
+        },
+        {
+          name: "Auto-sync",
+          desc: "Sync automatically in the background.",
+          control: { type: "toggle", key: "autoSync" },
+        },
+        {
+          name: "Auto-sync mode",
+          desc: "Sync on a timer, or shortly after every change.",
+          visible: () => s.autoSync,
+          control: {
+            type: "dropdown",
+            key: "autoSyncMode",
+            options: { interval: "Every X minutes", "on-change": "On every change" },
+          },
+        },
+        {
+          name: "Auto-sync interval",
+          desc: "Minutes between automatic syncs.",
+          visible: () => s.autoSync && s.autoSyncMode === "interval",
+          control: {
+            type: "number",
+            key: "autoSyncIntervalMinutes",
+            min: 1,
+            step: 1,
+            validate: (v) => (Number.isFinite(v) && v >= 1 ? undefined : "Enter a whole number of minutes, 1 or more."),
+          },
+        },
+      ],
+    };
+  }
+
+  private encryptionPage(): SettingDefinitionItem {
+    const c = this.plugin.controller;
+    return {
+      type: "page",
+      name: "End-to-end encryption",
+      desc: "Optional. Encrypt note content before upload.",
+      items: [
+        {
+          name: "About end-to-end encryption",
+          desc:
+            "Optional. Encrypts note content before upload (zero-knowledge) using a passphrase — off by default, and not needed just to connect. " +
+            "If you lose the passphrase, encrypted content is unrecoverable.",
+        },
+        {
+          name: "Encrypt content",
+          desc: "Encrypt note content before it leaves this device.",
+          aliases: ["e2ee", "encryption", "passphrase"],
+          control: { type: "toggle", key: "e2ee" },
+        },
+        this.passwordRow(
+          "Passphrase",
+          "Held in memory only, never stored.",
+          () => "",
+          (v) => (this.passphrase = v)
+        ),
+        this.buttonRow("Unlock", "Derive the key from the passphrase above.", [
+          {
+            label: "Unlock",
+            onClick: () => {
+              void c.prepare(this.passphrase || undefined).then(
+                () => this.notify(c.ready ? "unlocked." : "nothing to unlock yet."),
+                (e: unknown) => this.notify(e instanceof Error ? e.message : String(e))
+              );
+            },
+          },
+        ]),
+      ],
+    };
   }
 }

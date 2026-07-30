@@ -1,7 +1,8 @@
 import { HttpResponse, HttpSend } from "../providers/RemoteProvider";
 
 const TRANSIENT = new Set([429, 500, 502, 503, 504]);
-const delay = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+/** `window.setTimeout`, not the bare global — the bare one breaks in popout windows. */
+const delay = (ms: number): Promise<void> => new Promise((r) => window.setTimeout(r, ms));
 
 /**
  * Wrap an HttpSend with exponential backoff + jitter on transient statuses.

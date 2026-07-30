@@ -1,5 +1,5 @@
 import { requestUrl } from "obsidian";
-import { HttpResponse, HttpSend } from "../providers/RemoteProvider";
+import { HttpSend } from "../providers/RemoteProvider";
 
 /**
  * Hard ceiling for a single request. Obsidian's `requestUrl` has no built-in
@@ -25,7 +25,7 @@ export const requestUrlHttp: HttpSend = async (method, url, headers, body) => {
     `${method} ${hostOf(url)} timed out after ${Math.round(REQUEST_TIMEOUT_MS / 1000)}s`
   );
   const h: Record<string, string> = {};
-  for (const [k, v] of Object.entries(res.headers ?? {})) h[k.toLowerCase()] = v as string;
+  for (const [k, v] of Object.entries(res.headers ?? {})) h[k.toLowerCase()] = v;
   return {
     status: res.status,
     headers: h,
@@ -34,14 +34,18 @@ export const requestUrlHttp: HttpSend = async (method, url, headers, body) => {
   };
 };
 
-/** Reject with `msg` if `p` has not settled within `ms`; clears its timer either way. */
+/**
+ * Reject with `msg` if `p` has not settled within `ms`; clears its timer either
+ * way. Uses `window.setTimeout` so the timer belongs to the window the plugin is
+ * running in — a bare `setTimeout` breaks in Obsidian's popout windows.
+ */
 function withTimeout<T>(p: Promise<T>, ms: number, msg: string): Promise<T> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
+  let timer: number | undefined;
   const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new Error(msg)), ms);
+    timer = window.setTimeout(() => reject(new Error(msg)), ms);
   });
   return (Promise.race([p, timeout]) as Promise<T>).finally(() => {
-    if (timer !== undefined) clearTimeout(timer);
+    if (timer !== undefined) window.clearTimeout(timer);
   });
 }
 

@@ -3,7 +3,7 @@ import { GCS_ENDPOINT, GcsProvider } from "./providers/gcs/GcsProvider";
 import { GCS_OAUTH_SCOPE, bearerAuthorizer, sigv4Authorizer } from "./providers/gcs/auth";
 import { DriveProvider } from "./providers/drive/DriveProvider";
 import { driveScope } from "./providers/drive/DriveAuth";
-import { BUILTIN_OAUTH_CLIENT_ID, BUILTIN_OAUTH_CLIENT_SECRET, TokenSet, refreshAccessToken } from "./providers/google/oauth";
+import { TokenSet, refreshAccessToken } from "./providers/google/oauth";
 import { googleLoginLoopback } from "./obsidian/googleLogin";
 import { HttpSend, RemoteProvider } from "./providers/RemoteProvider";
 import { SyncEngine } from "./sync/SyncEngine";
@@ -47,14 +47,41 @@ export class SyncController {
     this.http = http ?? withRetry(requestUrlHttp);
   }
 
-  /** The OAuth client id to use: the user's own (Advanced) or the built-in one. */
+  /** The user's own OAuth client id ("" = not configured yet). */
   private clientId(): string {
-    return this.settings.oauthClientId || BUILTIN_OAUTH_CLIENT_ID;
+    return this.settings.oauthClientId.trim();
   }
 
   /** The OAuth client secret to send, if the client requires one ("" = none / PKCE-only). */
   private clientSecret(): string {
-    return this.settings.oauthClientSecret || BUILTIN_OAUTH_CLIENT_SECRET;
+    return this.settings.oauthClientSecret.trim();
+  }
+
+  /** True once the user has supplied their own OAuth client id. */
+  get hasOAuthClient(): boolean {
+    return this.clientId() !== "";
+  }
+
+  /**
+   * An OAuth refresh token is stored, but no client id is configured — i.e. the
+   * token was issued by the built-in client that older versions shipped. Google
+   * ties a refresh token to the client that issued it, so such a token can no
+   * longer be refreshed and the user has to reconnect with their own client.
+   * Surfaced in settings so this shows up as an instruction, not a sync error.
+   */
+  get needsReconnectForOwnClient(): boolean {
+    return !this.hasOAuthClient && (this.settings.driveToken !== null || this.settings.gcsToken !== null);
+  }
+
+  /**
+   * Every OAuth call needs the user's own client. Thrown as one actionable
+   * message rather than letting Google reject the request with `invalid_client`.
+   */
+  private requireOAuthClient(): void {
+    if (this.hasOAuthClient) return;
+    throw new Error(
+      "No Google OAuth client configured — add your own client ID and secret in settings under the backend's \"OAuth client\" rows, then reconnect."
+    );
   }
 
   /** A passphrase is needed only for E2EE or to open a legacy encrypted credential. */
@@ -174,11 +201,7 @@ export class SyncController {
   }
 
   private async login(scope: string, label: string): Promise<TokenSet> {
-    if (!this.clientId()) {
-      throw new Error(
-        "One-click sign-in isn't set up in this build yet — add your own OAuth Client ID under Advanced."
-      );
-    }
+    this.requireOAuthClient();
     const tokens = await googleLoginLoopback({ clientId: this.clientId(), clientSecret: this.clientSecret(), scope, label });
     if (!tokens.refreshToken) {
       throw new Error("No refresh token returned — revoke the app at myaccount.google.com and reconnect.");
@@ -269,6 +292,7 @@ export class SyncController {
   private async getDriveToken(): Promise<string> {
     if (this.driveAccess && this.driveAccess.expiresAt > Date.now() + 60_000) return this.driveAccess.token;
     if (!this.driveRefresh) throw new Error("Connect Google Drive first.");
+    this.requireOAuthClient();
     const t = await refreshAccessToken(this.http, { clientId: this.clientId(), clientSecret: this.clientSecret(), refreshToken: this.driveRefresh }, Date.now());
     this.driveAccess = { token: t.accessToken, expiresAt: t.expiresAt };
     return t.accessToken;
@@ -277,6 +301,7 @@ export class SyncController {
   private async getGcsToken(): Promise<string> {
     if (this.gcsAccess && this.gcsAccess.expiresAt > Date.now() + 60_000) return this.gcsAccess.token;
     if (!this.gcsRefresh) throw new Error("Connect Google Cloud Storage first.");
+    this.requireOAuthClient();
     const t = await refreshAccessToken(this.http, { clientId: this.clientId(), clientSecret: this.clientSecret(), refreshToken: this.gcsRefresh }, Date.now());
     this.gcsAccess = { token: t.accessToken, expiresAt: t.expiresAt };
     return t.accessToken;

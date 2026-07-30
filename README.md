@@ -25,12 +25,38 @@ Google Sync keeps everything on **infrastructure you already own and control**:
 
 ## Two ways to connect
 
-- **Google Drive** — for everyone. Connect with your ordinary Google account;
-  nothing else to set up.
+- **Google Drive** — sync to your personal Drive with your ordinary Google
+  account.
 - **Google Cloud Storage** — for those already on Google Cloud. Sync to your own
   bucket.
 
 Use one, or set up both and choose which is active.
+
+## Setup
+
+Requires Obsidian **1.13.0** or newer.
+
+This plugin ships with **no OAuth credentials of its own**. You create a Google
+OAuth client once and paste it into settings; it then lives only in this vault's
+plugin data. That means there is no shared credential bundled into the plugin
+for anyone to extract, and every release can be rebuilt from source byte for
+byte — see [`SECURITY.md`](SECURITY.md).
+
+1. Open [Google Cloud Console → Credentials](https://console.cloud.google.com/apis/credentials)
+   and pick or create a project.
+2. If you plan to sync to Drive, enable the **Google Drive API** for that project.
+3. **Create credentials → OAuth client ID**, application type **Desktop app**.
+4. In Obsidian, open **Settings → Google Sync** and paste the **client ID** and
+   **client secret** under *Google OAuth client*.
+5. Turn on Google Drive and/or Google Cloud Storage, then press **Connect**.
+
+Sign-in uses the OAuth loopback flow (PKCE) against `127.0.0.1` — your browser
+opens, you approve, and the token is captured locally. Desktop only.
+
+> **Upgrading from 0.6.x or earlier?** Those versions signed in through a shared
+> OAuth client that was bundled into the plugin. That client has been removed, so
+> an existing sign-in can no longer be refreshed: create your own client as above
+> and press **Connect** again. Your synced files are not affected.
 
 ## Privacy & security
 
