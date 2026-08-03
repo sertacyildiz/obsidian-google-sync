@@ -26,8 +26,10 @@ public issue. You will get a response as soon as possible.
   > Versions **0.6.2 and earlier** did not meet these two properties: they
   > shipped a shared OAuth client whose secret was injected at build time, so the
   > released `main.js` could not be reproduced from source and the credential was
-  > distributed to every user. That client has been removed as of 0.7.0. If you
-  > ran an earlier version, register your own OAuth client and reconnect.
+  > distributed to every user. That client was removed in 0.7.0 and its secret
+  > has since been revoked, so sign-ins issued by it no longer refresh. If you
+  > are still on an earlier version, sync will fail with an authentication error
+  > until you upgrade, register your own OAuth client, and reconnect.
 - **Credentials are never synced or logged.** The plugin excludes its own
   config directory from the synced set and never logs secrets or signed
   material. OAuth scopes are kept narrow (`drive.file` / a single bucket) so a
