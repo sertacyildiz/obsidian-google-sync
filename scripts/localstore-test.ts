@@ -9,6 +9,7 @@
  *     --alias:obsidian=./scripts/_mock-obsidian.ts --outfile=/tmp/ls.cjs && node /tmp/ls.cjs
  */
 import { ObsidianLocalStore } from "../src/obsidian/ObsidianLocalStore";
+import { TFile, TFolder } from "obsidian";
 
 let pass = 0;
 let fail = 0;
@@ -19,41 +20,35 @@ const check = (label: string, ok: boolean): void => {
 
 // ---------------------------------------------------------------- list() scope
 
-interface FakeFile {
-  path: string;
-  stat: { mtime: number };
-}
-interface FakeFolder {
-  path: string;
-  children: (FakeFile | FakeFolder)[];
-}
-
 /**
  * A vault whose tree is explicit, so a test can tell scoped traversal apart from
  * "list everything, then filter". `calls.getFiles` counts whole-vault
  * enumerations — the number this change exists to keep at zero.
+ *
+ * Nodes are real TFile / TFolder instances because the store narrows with
+ * `instanceof`; plain object literals would silently fall through both branches
+ * and every scoped result would come back empty.
  */
 function makeVault(paths: string[]) {
   const calls = { getFiles: 0, readBinary: [] as string[] };
-  const files = new Map<string, FakeFile>();
-  const folders = new Map<string, FakeFolder>();
-  const root: FakeFolder = { path: "", children: [] };
-  folders.set("", root);
+  const files = new Map<string, TFile>();
+  const folders = new Map<string, TFolder>();
+  folders.set("", new TFolder(""));
 
-  const folderAt = (dir: string): FakeFolder => {
-    let cur = folders.get(dir);
-    if (cur) return cur;
+  const folderAt = (dir: string): TFolder => {
+    const existing = folders.get(dir);
+    if (existing) return existing;
     const slash = dir.lastIndexOf("/");
     const parent = folderAt(slash === -1 ? "" : dir.slice(0, slash));
-    cur = { path: dir, children: [] };
-    folders.set(dir, cur);
-    parent.children.push(cur);
-    return cur;
+    const made = new TFolder(dir);
+    folders.set(dir, made);
+    parent.children.push(made);
+    return made;
   };
 
   for (const p of paths) {
     const slash = p.lastIndexOf("/");
-    const f: FakeFile = { path: p, stat: { mtime: 1 } };
+    const f = new TFile(p);
     files.set(p, f);
     folderAt(slash === -1 ? "" : p.slice(0, slash)).children.push(f);
   }

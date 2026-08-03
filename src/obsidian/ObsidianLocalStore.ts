@@ -3,11 +3,6 @@ import { LocalStore } from "../sync/LocalStore";
 import { LocalFile } from "../sync/types";
 import { sha256Hex } from "../util/hash";
 
-/** A folder carries `children`; a file does not. Avoids `instanceof`, which ties tests to real Obsidian classes. */
-function isFolder(entry: TAbstractFile): entry is TFolder {
-  return Array.isArray((entry as TFolder).children);
-}
-
 /**
  * LocalStore backed by the Obsidian Vault adapter. Lists files within the
  * configured scope folder, ALWAYS excluding the vault config dir (`.obsidian`)
@@ -50,13 +45,16 @@ export class ObsidianLocalStore implements LocalStore {
     // vault: that would leak every path and mass-upload the entire vault.
     if (!root) return [];
 
+    // `instanceof` rather than a cast: Obsidian's own guidance is to check the
+    // concrete type of a TAbstractFile before using it, and a cast would happily
+    // treat a folder as a file and try to hash it.
     const found: TFile[] = [];
     const visit = (entry: TAbstractFile): void => {
-      if (isFolder(entry)) {
+      if (entry instanceof TFolder) {
         for (const child of entry.children) visit(child);
-        return;
+      } else if (entry instanceof TFile && this.inScope(entry.path)) {
+        found.push(entry);
       }
-      if (this.inScope(entry.path)) found.push(entry as TFile);
     };
     visit(root);
     return found;

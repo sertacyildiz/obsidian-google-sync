@@ -1,6 +1,6 @@
 {
   "name": "obsidian-google-sync",
-  "version": "0.7.1",
+  "version": "0.7.2",
   "description": "Comprehensive, security-first sync of your Obsidian vault to a Google backend you own (Google Drive or Google Cloud Storage).",
   "main": "main.js",
   "scripts": {

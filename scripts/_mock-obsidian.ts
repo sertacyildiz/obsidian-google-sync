@@ -123,8 +123,44 @@ export class Plugin {
   onunload() {}
 }
 
-export interface TFile {
-  path: string;
+/**
+ * Real classes, not interfaces: the store narrows with `instanceof TFile` /
+ * `instanceof TFolder` (Obsidian's documented idiom), so the offline tests have
+ * to construct genuine instances for that narrowing to behave as it does in the app.
+ */
+export class TAbstractFile {
+  path = "";
+}
+
+export class TFile extends TAbstractFile {
+  stat: { mtime: number; ctime: number; size: number } = { mtime: 0, ctime: 0, size: 0 };
+  basename = "";
+  extension = "";
+
+  constructor(path?: string, mtime = 1) {
+    super();
+    if (path !== undefined) {
+      this.path = path;
+      const base = path.slice(path.lastIndexOf("/") + 1);
+      const dot = base.lastIndexOf(".");
+      this.basename = dot === -1 ? base : base.slice(0, dot);
+      this.extension = dot === -1 ? "" : base.slice(dot + 1);
+    }
+    this.stat.mtime = mtime;
+  }
+}
+
+export class TFolder extends TAbstractFile {
+  children: TAbstractFile[] = [];
+
+  constructor(path?: string) {
+    super();
+    if (path !== undefined) this.path = path;
+  }
+
+  isRoot(): boolean {
+    return this.path === "";
+  }
 }
 
 /** Type-only aliases so the plugin's `import type` names resolve against the mock. */
