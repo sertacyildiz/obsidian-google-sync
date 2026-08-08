@@ -1,5 +1,8 @@
 # Google Sync for Obsidian
 
+[![Obsidian Downloads](https://img.shields.io/badge/dynamic/json?logo=obsidian&color=%23483699&label=downloads&query=%24%5B%22google-cloud-sync%22%5D.downloads&url=https%3A%2F%2Fraw.githubusercontent.com%2Fobsidianmd%2Fobsidian-releases%2Fmaster%2Fcommunity-plugin-stats.json)](https://obsidian.md/plugins?id=google-cloud-sync)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 Sync your Obsidian vault to a **Google backend you own** — your personal
 **Google Drive**, or your own **Google Cloud Storage** bucket — privately, with
 optional end-to-end encryption and **no third-party server**.
@@ -32,9 +35,18 @@ Google Sync keeps everything on **infrastructure you already own and control**:
 
 Use one, or set up both and choose which is active.
 
-## Setup
+## Installation
 
-Requires Obsidian **1.13.0** or newer.
+You can install Google Sync directly from the Obsidian Community Plugins directory:
+
+1. Open Obsidian **Settings** -> **Community Plugins**.
+2. Disable "Safe Mode" if it's currently enabled.
+3. Click **Browse** and search for **Google Sync**.
+4. Click **Install**, and once installed, click **Enable**.
+
+*Requires Obsidian **1.13.0** or newer.*
+
+## Configuration & Setup
 
 This plugin ships with **no OAuth credentials of its own**. You create a Google
 OAuth client once and paste it into settings; it then lives only in this vault's
@@ -65,9 +77,9 @@ synced and never logged, permission scopes are kept minimal, and content
 encryption is available so a backend leak is never a content leak. Details in
 [`SECURITY.md`](SECURITY.md).
 
-## Status
+## Support & Feedback
 
-Beta. Setup and usage documentation is on the way.
+If you encounter any issues or have feature requests, please check the [Issues](https://github.com/YOUR_GITHUB_NAME/YOUR_REPO_NAME/issues) page to report them or contribute. 
 
 ## License
 
