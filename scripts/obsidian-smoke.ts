@@ -7,11 +7,13 @@
  */
 import GoogleSyncPlugin from "../src/main";
 import { SyncController } from "../src/SyncController";
-import { Setting, SettingGroup } from "obsidian";
+import { HashCache } from "../src/obsidian/HashCache";
+import { Platform, Setting, SettingGroup, notices, renderedText } from "obsidian";
 
 /** The shape of a declarative setting definition, as far as this test inspects it. */
 interface SettingDef {
   name?: string;
+  desc?: unknown;
   heading?: string;
   visible?: boolean | (() => boolean);
   control?: { type: string; key: string };
@@ -34,6 +36,10 @@ const fresh = (): Walked => ({ headings: [], controls: [], rendered: 0, hidden: 
   clearInterval: () => {},
   open: () => {},
 };
+(globalThis as unknown as { document: unknown }).document = { visibilityState: "visible" };
+
+/** Callbacks handed to workspace.onLayoutReady, so a test can fire "Obsidian finished opening". */
+const layoutReady: (() => unknown)[] = [];
 
 function makeEl(): Record<string, unknown> {
   return { empty() {}, createEl() { return makeEl(); }, createDiv() { return makeEl(); }, setText() {} };
@@ -57,6 +63,17 @@ function makeApp(): unknown {
       },
       on: () => ({}),
     },
+    workspace: {
+      onLayoutReady: (cb: () => unknown) => void layoutReady.push(cb),
+    },
+    // Obsidian's per-device storage (never synced) — one Map per app, i.e. per device.
+    ...(() => {
+      const local = new Map<string, unknown>();
+      return {
+        loadLocalStorage: (k: string) => (local.has(k) ? local.get(k) : null),
+        saveLocalStorage: (k: string, v: unknown) => void local.set(k, v),
+      };
+    })(),
   };
 }
 
@@ -93,6 +110,18 @@ async function main(): Promise<void> {
   check("registers sync-now + lock commands", cmdIds.includes("sync-now") && cmdIds.includes("lock"));
   check("registers a ribbon + a settings tab", plugin._ribbons.length === 1 && plugin._settingTabs.length === 1);
   check("registers vault events for on-change auto-sync", plugin._events.length >= 3);
+  const handlers = plugin._protocolHandlers as { action: string }[];
+  check("registers exactly one obsidian:// handler, for google-cloud-sync-auth", handlers.length === 1 && handlers[0].action === "google-cloud-sync-auth");
+  let callbackOk = true;
+  try {
+    await plugin.onAuthCallback({ action: "google-cloud-sync-auth", code: "4/x", state: "s" });
+  } catch {
+    callbackOk = false;
+  }
+  check(
+    "a callback with no sign-in in progress becomes a notice, not a throw",
+    callbackOk && plugin.settings.driveToken === null && notices.some((n) => n.includes("No sign-in in progress"))
+  );
 
   // ---- declarative settings (Obsidian 1.13+) ----
   // The tab no longer implements display(); it returns definitions and the
@@ -261,6 +290,118 @@ async function main(): Promise<void> {
     autoOk = false;
   }
   check("auto-sync while locked is a quiet no-op", autoOk);
+
+  // (4) the OAuth-client rows follow the platform: Web application + redirect URI on the phone, unchanged on desktop
+  const flat = (items: SettingDef[]): SettingDef[] => items.flatMap((i) => [i, ...flat(i.items ?? [])]);
+  plugin.settings.oauthClientId = "";
+  Object.assign(Platform, { isMobileApp: true, isDesktopApp: false, isMobile: true });
+  renderedText.length = 0;
+  let mobileOk = true;
+  let mobileDefs: SettingDef[] = [];
+  let mobile: Walked = fresh();
+  try {
+    mobileDefs = tab.getSettingDefinitions();
+    mobile = walk(mobileDefs, fresh());
+  } catch (e) {
+    mobileOk = false;
+    console.log("    mobile walk threw:", (e as Error).message);
+  }
+  check("mobile: settings build + render", mobileOk);
+  check('mobile: set-up steps name the "Web application" client type', renderedText.some((t) => t.includes('"Web application"')));
+  check("mobile: shows the redirect URI to register", flat(mobileDefs).find((i) => i.name === "Redirect URI")?.desc === plugin.controller.redirectUri);
+  check("mobile: a self-hosted redirect page is a bound setting", mobile.controls.includes("oauthRedirectPage"));
+  Object.assign(Platform, { isMobileApp: false, isDesktopApp: true, isMobile: false });
+  renderedText.length = 0;
+  const desktopDefs = tab.getSettingDefinitions();
+  const desktop = walk(desktopDefs, fresh());
+  check(
+    'desktop: unchanged — "Desktop app" steps, no redirect rows',
+    renderedText.some((t) => t.includes('"Desktop app"')) && !desktop.controls.includes("oauthRedirectPage") && !flat(desktopDefs).some((i) => i.name === "Redirect URI")
+  );
+
+  // (5) mobile onload: a hash cache is loaded (an unreadable file just means an empty one) and vault events keep it honest
+  check("desktop: no hash cache", plugin.controller.hashCache === undefined);
+  Object.assign(Platform, { isMobileApp: true, isDesktopApp: false, isMobile: true });
+  const phone = new (GoogleSyncPlugin as unknown as new (a: unknown, m: unknown) => Record<string, any>)(makeApp(), {
+    id: "google-cloud-sync",
+    name: "Google Sync",
+    version: "0.8.0",
+    dir: ".obsidian/plugins/google-cloud-sync",
+  });
+  let phoneOk = true;
+  try {
+    await phone.onload();
+  } catch (e) {
+    phoneOk = false;
+    console.log("    mobile onload threw:", (e as Error).message);
+  }
+  check("mobile: onload runs (cache file unreadable → empty cache, no throw)", phoneOk);
+  check("mobile: the controller gets a hash cache", phone.controller?.hashCache instanceof HashCache);
+  check("mobile: local reads are capped; desktop: not", phone.controller?.maxConcurrentReads === 4 && plugin.controller.maxConcurrentReads === undefined);
+  check("mobile: vault modify/delete/rename are wired to evict cache entries", (phone._events as unknown[]).length >= (plugin._events as unknown[]).length + 3);
+  const resume = (phone._domEvents as { type: string; cb: () => unknown }[]).filter((e) => e.type === "visibilitychange");
+  check("mobile: syncs on open (onLayoutReady) and on return to the foreground (visibilitychange)", layoutReady.length === 1 && resume.length === 1);
+  let resumeOk = true;
+  try {
+    phone.settings.autoSync = true;
+    await layoutReady[0]();
+    await resume[0].cb();
+  } catch (e) {
+    resumeOk = false;
+    console.log("    resume trigger threw:", (e as Error).message);
+  }
+  check("mobile: firing the resume triggers while unconfigured is a quiet no-op", resumeOk);
+
+  // (6) settings that arrived from another device (a synced .obsidian folder) must not start syncing on their own
+  const emptyReport = { uploaded: [], downloaded: [], deletedLocal: [], deletedRemote: [], conflicts: [], errors: [] };
+  let phoneSyncs = 0;
+  phone.controller.sync = async () => {
+    phoneSyncs++;
+    return emptyReport;
+  };
+  phone.settings.driveEnabled = true;
+  phone.settings.driveToken = { enc: false, data: "desktop-refresh-token" }; // as if data.json came from the desktop
+  await phone.controller.prepare();
+  const sharedNotice = () => flat(phone._settingTabs[0].getSettingDefinitions()).find((i: SettingDef) => i.heading === "Settings from another device");
+  const noticeShown = () => {
+    const n = sharedNotice();
+    return !!n && (typeof n.visible !== "function" || n.visible());
+  };
+  await phone.runSync(true);
+  check("mobile, settings from another device: automatic sync does not run", phone.controller.ready === true && phoneSyncs === 0);
+  check("mobile, settings from another device: settings say so", noticeShown());
+  await phone.runSync(false); // the user presses Sync now on this phone
+  check("mobile: Sync now runs and sets this phone up", phoneSyncs === 1 && phone.settings.syncDevices.length === 1);
+  await phone.runSync(true);
+  check("mobile, set up here: automatic sync runs, notice gone", phoneSyncs === 2 && !noticeShown());
+  const otherPhone = new (GoogleSyncPlugin as unknown as new (a: unknown, m: unknown) => Record<string, any>)(makeApp(), { id: "google-cloud-sync", name: "Google Sync", version: "0.8.0" });
+  await otherPhone.onload();
+  Object.assign(otherPhone.settings, JSON.parse(JSON.stringify(phone.settings))); // the same data.json, synced to a second phone
+  await otherPhone.controller.prepare();
+  let otherSyncs = 0;
+  otherPhone.controller.sync = async () => {
+    otherSyncs++;
+    return emptyReport;
+  };
+  await otherPhone.runSync(true);
+  check("mobile: a second phone with the same data.json is not set up by the first", otherSyncs === 0);
+  otherPhone.onunload();
+  phone.onunload();
+  Object.assign(Platform, { isMobileApp: false, isDesktopApp: true, isMobile: false });
+
+  // desktop is never gated: 0.7.3 behaviour
+  let desktopSyncs = 0;
+  const realSync = plugin.controller.sync;
+  plugin.controller.sync = async () => {
+    desktopSyncs++;
+    return emptyReport;
+  };
+  plugin.settings.driveEnabled = true;
+  plugin.settings.driveToken = { enc: false, data: "d" };
+  await plugin.controller.prepare();
+  await plugin.runSync(true);
+  check("desktop: automatic sync is not gated, no device bookkeeping", desktopSyncs === 1 && plugin.settings.syncDevices.length === 0 && !flat(tab.getSettingDefinitions()).some((i) => i.heading === "Settings from another device"));
+  plugin.controller.sync = realSync;
 
   plugin.onunload();
   console.log(`\n=== obsidian smoke: ${fail === 0 ? "ALL PASS" : fail + " FAILED"} (${pass} passed) ===`);

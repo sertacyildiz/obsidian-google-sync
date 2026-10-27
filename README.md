@@ -62,8 +62,43 @@ byte — see [`SECURITY.md`](SECURITY.md).
    **client secret** under *Google OAuth client*.
 5. Turn on Google Drive and/or Google Cloud Storage, then press **Connect**.
 
-Sign-in uses the OAuth loopback flow (PKCE) against `127.0.0.1` — your browser
-opens, you approve, and the token is captured locally. Desktop only.
+On the desktop, sign-in uses the OAuth loopback flow (PKCE) against `127.0.0.1` —
+your browser opens, you approve, and the token is captured locally.
+
+### On your phone (Android / iOS)
+
+The same plugin runs on Obsidian mobile; install it from Community Plugins on
+the phone. A phone app cannot listen on a local port, so sign-in goes through
+your browser and comes back to Obsidian instead:
+
+1. In the **same Google Cloud project** you use on your computer (so both see
+   the same Drive files), **Create credentials → OAuth client ID**, application
+   type **Web application**.
+2. Under **Authorized redirect URIs**, add
+   `https://sertacyildiz.github.io/obsidian-google-sync/oauth/` — the phone's
+   settings show it too, with a Copy button.
+3. On the phone, paste **this** client's ID and secret under *Google OAuth
+   client*, then press **Connect**. Your browser opens; once you approve, it
+   hands you back to Obsidian.
+
+The redirect page is a static page in this repository (`docs/oauth/`). It only
+passes a one-time code back to Obsidian, and that code is useless without the
+key that never leaves your phone — see [`SECURITY.md`](SECURITY.md). You can host
+the page yourself and set *Redirect page (advanced)* to your copy.
+
+Google Cloud Storage with an **HMAC key** needs no sign-in at all, on any device.
+
+> **Is your vault's `.obsidian` folder synced by something else** (iCloud,
+> Obsidian Sync with plugin settings, Syncthing)? Then this plugin's settings,
+> sign-in included, travel to your phone with it. On a phone that receives them,
+> automatic sync stays off until you press **Sync now** there, and settings say
+> so. Better: exclude `.obsidian/plugins/google-cloud-sync/` from that other sync,
+> so each device keeps its own sign-in.
+
+> If your OAuth consent screen is still in **Testing**, Google expires refresh
+> tokens after 7 days, on every device. Switching it to **In production** avoids
+> that; for your own client, Google may show an "unverified app" screen that you
+> can continue past.
 
 > **Upgrading from 0.6.x or earlier?** Those versions signed in through a shared
 > OAuth client that was bundled into the plugin. That client has been removed, so
@@ -79,7 +114,7 @@ encryption is available so a backend leak is never a content leak. Details in
 
 ## Support & Feedback
 
-If you encounter any issues or have feature requests, please check the [Issues](https://github.com/YOUR_GITHUB_NAME/YOUR_REPO_NAME/issues) page to report them or contribute. 
+If you encounter any issues or have feature requests, please check the [Issues](https://github.com/sertacyildiz/obsidian-google-sync/issues) page to report them or contribute.
 
 ## License
 

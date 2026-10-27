@@ -1,4 +1,5 @@
 import { SyncStateData } from "./sync/types";
+import type { PendingAuth } from "./providers/google/redirectLogin";
 
 /**
  * A stored secret. `enc=false` → `data` is plaintext (kept in data.json, which
@@ -40,6 +41,16 @@ export interface GoogleSyncSettings {
   // --- shared OAuth client. Empty → built-in client. Secret sent only if the client needs one (Desktop/Web). ---
   oauthClientId: string;
   oauthClientSecret: string;
+  /** Phone sign-in: the redirect page Google returns to ("" = the one this repo publishes). Must match the client's registered redirect URI. */
+  oauthRedirectPage: string;
+  /** Phone sign-in waiting for its obsidian:// callback; null when none. Single-use, short-lived. */
+  pendingAuth: PendingAuth | null;
+  /**
+   * Phones this plugin was set up on (device-local ids, see main.ts). data.json can
+   * reach a phone through another tool syncing `.obsidian` (iCloud, Obsidian Sync,
+   * Syncthing); automatic sync runs only on a phone listed here. Desktop ignores it.
+   */
+  syncDevices: string[];
 
   // --- sync behaviour ---
   syncFolder: string; // "" = whole vault
@@ -81,6 +92,9 @@ export const DEFAULT_SETTINGS: GoogleSyncSettings = {
 
   oauthClientId: "",
   oauthClientSecret: "",
+  oauthRedirectPage: "",
+  pendingAuth: null,
+  syncDevices: [],
 
   syncFolder: "",
   autoSync: false,

@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-pt5gM0IfeCki5QmutNKNeSQFRqUlQOcKF5Nm7u4CVTk='; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
+<title>Google Sync — back to Obsidian</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { margin: 0; font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; display: grid; place-items: center; min-height: 100vh; }
+  main { max-width: 26rem; padding: 1.5rem; text-align: center; }
+  a#open { display: inline-block; margin-top: 0.5rem; padding: 0.6rem 1.2rem; border-radius: 0.5rem; background: #7c3aed; color: #fff; text-decoration: none; font-weight: 600; }
+  a#open[hidden] { display: none; }
+  .note { font-size: 0.85rem; opacity: 0.7; margin-top: 1.5rem; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Google Sync</h1>
+  <p id="status">Returning you to Obsidian…</p>
+  <a id="open" hidden>Open Obsidian</a>
+  <p class="note">This page only passes the one-time sign-in code back to Obsidian on this device. It stores nothing, loads nothing else, and the code is useless without the key that stays in Obsidian.</p>
+</main>
+<script>
+(function () {
+  var KEYS = ["code", "state", "error"];
+  var query = new URLSearchParams(location.search);
+  var out = new URLSearchParams();
+  query.forEach(function (value, key) {
+    if (KEYS.indexOf(key) !== -1 && !out.has(key)) out.set(key, value);
+  });
+  var status = document.getElementById("status");
+  if (!out.has("code") && !out.has("error")) {
+    status.textContent = "Nothing to do here.";
+    return;
+  }
+  history.replaceState(null, "", location.pathname);
+  var href = "obsidian://google-cloud-sync-auth?" + out.toString();
+  var link = document.getElementById("open");
+  link.href = href;
+  link.hidden = false;
+  status.textContent = out.has("error")
+    ? "Sign-in was not completed. Returning you to Obsidian…"
+    : "Signed in. Returning you to Obsidian…";
+  location.href = href;
+})();
+</script>
+</body>
+</html>

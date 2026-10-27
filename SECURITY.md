@@ -15,8 +15,20 @@ public issue. You will get a response as soon as possible.
   no client secret: you register your own Google OAuth client and it is stored
   only in this vault's plugin data. Sign-in is the installed-app **PKCE** flow;
   the client secret is sent to Google's token endpoint only because Google
-  requires it for "Desktop app" clients, and it is *your* secret, never ours.
-  Google Cloud Storage can instead use an HMAC key you create.
+  requires it for "Desktop app" and "Web application" clients, and it is *your*
+  secret, never ours. Google Cloud Storage can instead use an HMAC key you create.
+- **Phone sign-in passes through a static page that learns nothing usable.** On
+  mobile, Google redirects to `docs/oauth/` (served by GitHub Pages from this
+  repository), which only hands the authorization code back to Obsidian through
+  `obsidian://google-cloud-sync-auth`. That code is single-use, expires within
+  minutes, and is bound by PKCE to a verifier that never leaves the device;
+  redeeming it also takes your client secret. The page has no backend, loads
+  nothing else, runs only its own script (pinned by hash in its CSP), sends no
+  Referer and removes the code from the address bar. A random `state` ties each
+  callback to the sign-in that started it, so a crafted `obsidian://` link is
+  rejected rather than acted on. Like any web host, GitHub can see the request;
+  if you would rather it didn't, host the page yourself and point
+  *Redirect page (advanced)* at your copy.
 - **Releases are reproducible.** Because nothing is injected at build time,
   `npm ci && npm run build` at a release tag reproduces the published `main.js`
   byte for byte, and each release asset carries a GitHub build-provenance

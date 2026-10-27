@@ -6,7 +6,7 @@
 import { SyncEngine } from "../src/sync/SyncEngine";
 import { identityCryptor } from "../src/sync/Cryptor";
 import { LocalStore } from "../src/sync/LocalStore";
-import { LocalFile } from "../src/sync/types";
+import { LocalFile, SyncStateData } from "../src/sync/types";
 import { PutResult, RemoteObject, RemoteProvider } from "../src/providers/RemoteProvider";
 import { sha256Hex } from "../src/util/hash";
 import { DEFAULT_SETTINGS } from "../src/settings";
@@ -29,7 +29,10 @@ class FakeRemote implements RemoteProvider {
     const e = this.store.get(path);
     if (e) e.mtime = mtime;
   }
+  /** Test hook: how many object reads (downloads / conflict compares) a run made. */
+  gets = 0;
   async get(path: string): Promise<ArrayBuffer | null> {
+    this.gets++;
     return this.store.get(path)?.data ?? null;
   }
   async head(path: string): Promise<RemoteObject | null> {
@@ -298,6 +301,50 @@ async function main(): Promise<void> {
   }
   // 14. protect-local defaults OFF — multi-device deletes propagate; safety comes from the guard + trash, not from never-deleting
   check("protect-local defaults OFF for both backends", DEFAULT_SETTINGS.driveProtectLocal === false && DEFAULT_SETTINGS.gcsProtectLocal === false);
+
+  // 15. checkpoints — a long sync saves its baseline as it goes, so a killed run resumes instead of redoing
+  const seedRemote = async (R: FakeRemote, n: number) => {
+    for (let i = 0; i < n; i++) await R.put(`n${String(i).padStart(2, "0")}.md`, enc(`note ${i}`));
+  };
+  {
+    const L = new FakeLocal(), R = new FakeRemote();
+    await seedRemote(R, 60);
+    const sizes: number[] = [];
+    let first: SyncStateData | null = null;
+    const { state } = await newEngine(L, R).sync({}, async (s) => {
+      sizes.push(Object.keys(s).length);
+      first = first ?? s;
+    });
+    check("checkpoint: called after every 25 paths (25, 50) of a 60-file sync", JSON.stringify(sizes) === JSON.stringify([25, 50]));
+    check("checkpoint: final state has all 60; the checkpoint got a snapshot, not the live object", Object.keys(state).length === 60 && Object.keys(first ?? {}).length === 25);
+  }
+  {
+    const L = new FakeLocal(), R = new FakeRemote();
+    await seedRemote(R, 60);
+    let saved: SyncStateData = {};
+    const killed = await newEngine(L, R)
+      .sync({}, async (s) => {
+        saved = s; // persisted …
+        throw new Error("killed"); // … then the app died
+      })
+      .then(() => false, () => true);
+    check("checkpoint: a failing checkpoint aborts the run (25 files in, 25 recorded)", killed && L.store.size === 25 && Object.keys(saved).length === 25);
+    R.gets = 0;
+    const { report } = await newEngine(L, R).sync(saved);
+    check(
+      "resume from the checkpoint: downloads only the remaining 35, no conflicts, no re-reads",
+      report.downloaded.length === 35 && report.conflicts.length === 0 && R.gets === 35 && L.store.size === 60
+    );
+  }
+  {
+    // A checkpoint rewrites the plugin's whole data.json; a sync that changes nothing must not write it at all.
+    const L = new FakeLocal(), R = new FakeRemote();
+    await seedRemote(R, 1000);
+    const s1 = (await newEngine(L, R).sync({})).state;
+    let calls = 0;
+    await newEngine(L, R).sync(s1, async () => void calls++);
+    check("checkpoint: a sync where nothing changed writes none (1,000 unchanged files)", calls === 0);
+  }
 
   console.log(`\n=== sync engine: ${failed === 0 ? "ALL PASS" : failed + " FAILED"} (${passed} passed) ===`);
   if (failed) process.exitCode = 1;

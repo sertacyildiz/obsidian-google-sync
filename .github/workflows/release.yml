@@ -69,6 +69,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ inputs.tag || github.ref_name }}
         run: |
+          # A tag with a suffix (0.8.0-beta.1) is a pre-release for BRAT testers.
+          # The community store follows manifest.json on main, not the releases list.
+          PRE=""
+          case "$TAG" in *-*) PRE="--prerelease" ;; esac
           gh release view "$TAG" >/dev/null 2>&1 \
-            || gh release create "$TAG" --title "$TAG" --generate-notes
+            || gh release create "$TAG" --title "$TAG" --generate-notes $PRE
           gh release upload "$TAG" main.js manifest.json styles.css --clobber

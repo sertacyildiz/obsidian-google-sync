@@ -2,15 +2,24 @@
  * load path (onload + settings tab + commands) headlessly in Node. Aliased in
  * place of the real `obsidian` module by the smoke test. Not shipped. */
 export class App {}
+/** Every notice shown, oldest first. */
+export const notices: string[] = [];
 export class Notice {
-  constructor(_msg: string) {}
+  constructor(msg: string) {
+    notices.push(msg);
+  }
 }
+/** Text that settings fragments rendered (createEl `text`, appendText, setText) — lets a test read the copy. */
+export const renderedText: string[] = [];
 export function debounce<T extends (...a: unknown[]) => unknown>(fn: T): T {
   return fn;
 }
 export function normalizePath(p: string): string {
   return p.replace(/\\/g, "/").replace(/\/{2,}/g, "/").replace(/^\//, "").replace(/\/$/, "");
 }
+/** Platform flags — mutable so a test can pose as the mobile app. Defaults to desktop. */
+export const Platform = { isDesktopApp: true, isMobileApp: false, isMobile: false };
+
 /** Every request handed to `requestUrl`, oldest first — lets transport tests see exactly what reached Obsidian. */
 export const requestUrlCalls: { url: string; method?: string; headers?: Record<string, string>; body?: ArrayBuffer }[] = [];
 
@@ -59,7 +68,17 @@ export class Setting {
 export class SettingGroup {}
 
 function makeEl(): Record<string, unknown> {
-  return { empty() {}, createEl() { return makeEl(); }, createDiv() { return makeEl(); }, setText() {}, appendChild() {}, appendText() {} };
+  return {
+    empty() {},
+    createEl(_tag?: string, o?: { text?: string }) {
+      if (o?.text) renderedText.push(o.text);
+      return makeEl();
+    },
+    createDiv() { return makeEl(); },
+    setText(t?: string) { if (t) renderedText.push(t); },
+    appendChild() {},
+    appendText(t?: string) { if (t) renderedText.push(t); },
+  };
 }
 
 /**
@@ -123,6 +142,8 @@ export class Plugin {
   _settingTabs: { display: () => void }[] = [];
   _events: unknown[] = [];
   _intervals: unknown[] = [];
+  _protocolHandlers: { action: string; handler: (params: Record<string, string>) => unknown }[] = [];
+  _domEvents: { el: unknown; type: string; cb: () => unknown }[] = [];
   private _data: unknown = null;
   constructor(app: unknown, manifest: unknown) {
     this.app = app;
@@ -133,6 +154,8 @@ export class Plugin {
   addSettingTab(tab: { display: () => void }) { this._settingTabs.push(tab); }
   registerEvent(ref: unknown) { this._events.push(ref); }
   registerInterval(id: unknown) { this._intervals.push(id); return id; }
+  registerObsidianProtocolHandler(action: string, handler: (params: Record<string, string>) => unknown) { this._protocolHandlers.push({ action, handler }); }
+  registerDomEvent(el: unknown, type: string, cb: () => unknown) { this._domEvents.push({ el, type, cb }); }
   async loadData() { return this._data; }
   async saveData(d: unknown) { this._data = d; }
   async onload() {}

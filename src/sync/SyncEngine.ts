@@ -30,6 +30,9 @@ export class MassDeletionAbort extends Error {
 /** Default delete guard: allow up to max(10, 20% of tracked files) deletions per side, per sync. */
 export const defaultDeleteGuard = (trackedCount: number): number => Math.max(10, Math.ceil(trackedCount * 0.2));
 
+/** How many changed baseline entries between checkpoints during one sync. */
+export const CHECKPOINT_EVERY = 25;
+
 /**
  * Provider-agnostic two-way sync via a three-way merge (local vs remote vs the
  * last-synced baseline `state`). Conflict policy is **never lose data**:
@@ -59,7 +62,17 @@ export class SyncEngine {
     private readonly deleteGuard: (trackedCount: number) => number = defaultDeleteGuard
   ) {}
 
-  async sync(prev: SyncStateData): Promise<{ state: SyncStateData; report: SyncReport }> {
+  /**
+   * `checkpoint`, if given, receives a snapshot of the baseline every
+   * {@link CHECKPOINT_EVERY} changed entries, so a run that dies halfway (the app
+   * killed on a phone) resumes from there instead of re-reading everything to
+   * compare. Paths that needed nothing do not count: a checkpoint rewrites the
+   * plugin's whole data.json, and a sync that changes nothing must not write it.
+   * A partial baseline is valid: each entry records work that completed, and
+   * unprocessed paths keep their previous entry. A checkpoint that throws aborts
+   * the run — safe, since a re-run reconciles from the last good baseline.
+   */
+  async sync(prev: SyncStateData, checkpoint?: (state: SyncStateData) => Promise<void>): Promise<{ state: SyncStateData; report: SyncReport }> {
     const [localList, remoteList] = await Promise.all([this.local.list(), this.remote.list(this.scope)]);
     // The plugin's own remote files (the E2EE header) are never vault content.
     const localMap = new Map<string, LocalFile>(localList.filter((f) => !isReservedPath(f.path)).map((f) => [f.path, f]));
@@ -95,12 +108,16 @@ export class SyncEngine {
     };
 
     const paths = new Set<string>([...localMap.keys(), ...remoteMap.keys(), ...Object.keys(prev)]);
+    let changed = 0;
     for (const path of paths) {
+      const before = state[path];
       try {
         await this.reconcile(path, localMap.get(path), remoteMap.get(path), prev[path], state, report);
       } catch (e) {
         report.errors.push({ path, error: (e as Error).message });
       }
+      // reconcile replaces or deletes an entry when it changes one, so identity is enough.
+      if (checkpoint && state[path] !== before && ++changed % CHECKPOINT_EVERY === 0) await checkpoint({ ...state });
     }
     return { state, report };
   }

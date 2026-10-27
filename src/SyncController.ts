@@ -1,15 +1,17 @@
-import { App } from "obsidian";
+import { App, Platform } from "obsidian";
 import { GCS_ENDPOINT, GcsProvider } from "./providers/gcs/GcsProvider";
 import { GCS_OAUTH_SCOPE, bearerAuthorizer, sigv4Authorizer } from "./providers/gcs/auth";
 import { DriveProvider } from "./providers/drive/DriveProvider";
 import { driveScope } from "./providers/drive/DriveAuth";
-import { TokenSet, refreshAccessToken } from "./providers/google/oauth";
+import { TokenSet, exchangeCode, refreshAccessToken } from "./providers/google/oauth";
+import { OAuthBackend, REDIRECT_PAGE_URL, acceptCallback, startRedirectLogin } from "./providers/google/redirectLogin";
 import { googleLoginLoopback } from "./obsidian/googleLogin";
 import { HttpSend, RemoteProvider } from "./providers/RemoteProvider";
 import { SyncEngine } from "./sync/SyncEngine";
 import { Cryptor, identityCryptor } from "./sync/Cryptor";
 import { SyncReport } from "./sync/types";
 import { ObsidianLocalStore } from "./obsidian/ObsidianLocalStore";
+import { HashCache } from "./obsidian/HashCache";
 import { requestUrlHttp } from "./obsidian/requestUrlHttp";
 import { withRetry } from "./util/retry";
 import { DEFAULT_APP_FOLDER, GoogleSyncSettings, StoredSecret } from "./settings";
@@ -19,7 +21,20 @@ import { openSecret, sealSecret } from "./crypto/secret";
 import { E2EE_HEADER_PATH, readHeader, unlockRemote } from "./crypto/e2eeHeader";
 import { base64Decode, base64Encode } from "./util/base64";
 
-type BackendId = "drive" | "gcs";
+type BackendId = OAuthBackend;
+
+const BACKEND_LABEL: Record<BackendId, string> = { drive: "Google Drive", gcs: "Google Cloud Storage" };
+
+/**
+ * What differs between desktop and the mobile app for sign-in. Injected so the
+ * phone path can be exercised offline; the plugin uses the default.
+ */
+export interface ControllerEnv {
+  /** Mobile app: sign in through the browser + redirect page instead of the loopback. */
+  mobile: boolean;
+  /** Open a URL in the system browser. */
+  openUrl: (url: string) => void;
+}
 
 /**
  * Wires the verified core to the plugin. Google Drive and Google Cloud Storage
@@ -45,14 +60,26 @@ export class SyncController {
   private driveRefresh: string | null = null; // unsealed Drive refresh token
   private driveAccess: { token: string; expiresAt: number } | null = null;
   private readonly http: HttpSend;
+  private readonly env: ControllerEnv;
+  /** Mobile only: lets the local listing skip re-reading unchanged files (set by the plugin). */
+  hashCache?: HashCache;
+  /** Mobile only: caps how many files the local listing reads at once (set by the plugin). */
+  maxConcurrentReads?: number;
 
   constructor(
     private readonly app: App,
     private readonly settings: GoogleSyncSettings,
     private readonly persist: () => Promise<void>,
-    http?: HttpSend
+    http?: HttpSend,
+    env?: ControllerEnv
   ) {
     this.http = http ?? withRetry(requestUrlHttp);
+    this.env = env ?? { mobile: Platform.isMobileApp, openUrl: (url) => void window.open(url) };
+  }
+
+  /** Where Google sends the phone sign-in back to — the redirect URI the user registers on their Web client. */
+  get redirectUri(): string {
+    return this.settings.oauthRedirectPage.trim() || REDIRECT_PAGE_URL;
   }
 
   /** The user's own OAuth client id ("" = not configured yet). */
@@ -258,30 +285,75 @@ export class SyncController {
     await this.persist();
   }
 
-  async connectDrive(passphrase?: string): Promise<void> {
-    const tokens = await this.login(driveScope(this.settings.driveScopeLevel), "Google Drive");
-    this.settings.driveToken = await this.seal(tokens.refreshToken as string, passphrase);
-    this.driveRefresh = tokens.refreshToken as string;
-    this.driveAccess = { token: tokens.accessToken, expiresAt: tokens.expiresAt };
-    await this.persist();
-  }
-
-  async connectGcs(passphrase?: string): Promise<void> {
-    const tokens = await this.login(GCS_OAUTH_SCOPE, "Google Cloud Storage");
-    this.settings.gcsToken = await this.seal(tokens.refreshToken as string, passphrase);
-    this.settings.gcsAuthMode = "oauth"; // connecting via OAuth selects the OAuth path
-    this.gcsRefresh = tokens.refreshToken as string;
-    this.gcsAccess = { token: tokens.accessToken, expiresAt: tokens.expiresAt };
-    await this.persist();
-  }
-
-  private async login(scope: string, label: string): Promise<TokenSet> {
+  /**
+   * Connect a backend with Google OAuth. Desktop: the loopback sign-in, done when
+   * this resolves ("connected"). Mobile app: opens the browser and resolves
+   * "pending" — the redirect page brings the code back through
+   * `obsidian://google-cloud-sync-auth`, and {@link completeRedirectLogin} finishes.
+   */
+  async connect(backend: BackendId): Promise<"connected" | "pending"> {
     this.requireOAuthClient();
-    const tokens = await googleLoginLoopback({ clientId: this.clientId(), clientSecret: this.clientSecret(), scope, label });
+    const scope = backend === "drive" ? driveScope(this.settings.driveScopeLevel) : GCS_OAUTH_SCOPE;
+    if (!this.env.mobile) {
+      const tokens = await googleLoginLoopback({ clientId: this.clientId(), clientSecret: this.clientSecret(), scope, label: BACKEND_LABEL[backend] });
+      await this.storeTokens(backend, tokens);
+      return "connected";
+    }
+    const { pending, authUrl } = await startRedirectLogin({ clientId: this.clientId(), scope, backend, redirectUri: this.redirectUri, now: Date.now() });
+    this.settings.pendingAuth = pending;
+    // Persist before the browser opens: the OS may kill Obsidian while the browser
+    // is in front, and the callback then cold-starts it with only data.json to go on.
+    await this.persist();
+    this.env.openUrl(authUrl);
+    return "pending";
+  }
+
+  /**
+   * Finish a phone sign-in from its `obsidian://` callback. The pending attempt is
+   * spent whatever happens — a rejected or failed callback means tapping Connect
+   * again — so a callback link can never be replayed.
+   */
+  async completeRedirectLogin(params: Record<string, string>): Promise<BackendId> {
+    const pending = this.settings.pendingAuth;
+    this.settings.pendingAuth = null;
+    let accepted: ReturnType<typeof acceptCallback>;
+    try {
+      accepted = acceptCallback(pending, params, Date.now());
+    } finally {
+      await this.persist();
+    }
+    this.requireOAuthClient();
+    const tokens = await exchangeCode(
+      this.http,
+      {
+        clientId: this.clientId(),
+        clientSecret: this.clientSecret(),
+        code: accepted.code,
+        codeVerifier: accepted.pending.verifier,
+        redirectUri: accepted.pending.redirectUri,
+      },
+      Date.now()
+    );
+    await this.storeTokens(accepted.pending.backend, tokens);
+    return accepted.pending.backend;
+  }
+
+  private async storeTokens(backend: BackendId, tokens: TokenSet): Promise<void> {
     if (!tokens.refreshToken) {
       throw new Error("No refresh token returned — revoke the app at myaccount.google.com and reconnect.");
     }
-    return tokens;
+    const access = { token: tokens.accessToken, expiresAt: tokens.expiresAt };
+    if (backend === "drive") {
+      this.settings.driveToken = await this.seal(tokens.refreshToken);
+      this.driveRefresh = tokens.refreshToken;
+      this.driveAccess = access;
+    } else {
+      this.settings.gcsToken = await this.seal(tokens.refreshToken);
+      this.settings.gcsAuthMode = "oauth"; // connecting via OAuth selects the OAuth path
+      this.gcsRefresh = tokens.refreshToken;
+      this.gcsAccess = access;
+    }
+    await this.persist();
   }
 
   async sync(): Promise<SyncReport> {
@@ -304,7 +376,7 @@ export class SyncController {
     };
     for (const id of backends) {
       const engine = new SyncEngine(
-        new ObsidianLocalStore(this.app, this.settings.syncFolder),
+        new ObsidianLocalStore(this.app, this.settings.syncFolder, this.hashCache, this.maxConcurrentReads),
         this.buildProvider(id),
         cryptors.get(id) as Cryptor,
         () => new Date(),
@@ -317,7 +389,10 @@ export class SyncController {
       // rather than reading the old flat baseline against the new layout and
       // mass-deleting. GCS layout (object keys) is unchanged.
       const stateKey = `${id}${id === "drive" ? "/mirror" : ""}/${this.remoteRoot(id)}`;
-      const { state, report } = await engine.sync(this.settings.syncState[stateKey] ?? {});
+      const { state, report } = await engine.sync(this.settings.syncState[stateKey] ?? {}, async (partial) => {
+        this.settings.syncState[stateKey] = partial;
+        await this.persist();
+      });
       this.settings.syncState[stateKey] = state;
       this.settings.backendLastSync[id] = Date.now(); // info only (settings display)
       merged.uploaded.push(...report.uploaded);

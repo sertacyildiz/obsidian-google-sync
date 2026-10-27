@@ -36,6 +36,8 @@ export function buildAuthUrl(p: {
   redirectUri: string;
   scope: string;
   codeChallenge: string;
+  /** Round-tripped by Google; the redirect flow uses it to tie a callback to the sign-in that started it. */
+  state?: string;
 }): string {
   const u = new URL(AUTH_ENDPOINT);
   u.searchParams.set("client_id", p.clientId);
@@ -46,6 +48,7 @@ export function buildAuthUrl(p: {
   u.searchParams.set("code_challenge_method", "S256");
   u.searchParams.set("access_type", "offline");
   u.searchParams.set("prompt", "consent");
+  if (p.state) u.searchParams.set("state", p.state);
   return u.toString();
 }
 

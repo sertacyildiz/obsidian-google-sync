@@ -1,6 +1,23 @@
-import { App, Notice, Plugin, PluginSettingTab, SettingDefinitionItem, SettingDefinitionRender, debounce } from "obsidian";
+import {
+  App,
+  Notice,
+  ObsidianProtocolData,
+  Platform,
+  Plugin,
+  PluginSettingTab,
+  SettingDefinitionItem,
+  SettingDefinitionRender,
+  SettingGroupItem,
+  TAbstractFile,
+  debounce,
+  normalizePath,
+} from "obsidian";
 import { DEFAULT_APP_FOLDER, DEFAULT_SETTINGS, GoogleSyncSettings } from "./settings";
 import { SyncController } from "./SyncController";
+import { HashCache } from "./obsidian/HashCache";
+import { MOBILE_MAX_CONCURRENT_READS } from "./obsidian/ObsidianLocalStore";
+import { AUTH_CALLBACK_ACTION, REDIRECT_PAGE_URL } from "./providers/google/redirectLogin";
+import { shouldSyncOnResume } from "./sync/resume";
 import { relativeTime } from "./util/time";
 
 export default class GoogleSyncPlugin extends Plugin {
@@ -8,10 +25,23 @@ export default class GoogleSyncPlugin extends Plugin {
   controller!: SyncController;
   private intervalId: number | null = null;
   private syncing = false;
+  /** Settles once settings are loaded and the controller exists. */
+  private ready!: Promise<void>;
+  private settingTab: GoogleSyncSettingTab | null = null;
+  private hashCache: HashCache | null = null;
+  /** Mobile only: this phone's id, kept in Obsidian's per-device storage (never synced). */
+  private deviceId: string | null = null;
 
   async onload(): Promise<void> {
-    await this.loadSettings();
-    this.controller = new SyncController(this.app, this.settings, () => this.saveData(this.settings));
+    // First, before anything awaits: a phone sign-in can cold-start Obsidian through
+    // this link, and the handler has to exist by the time the link is delivered. It
+    // waits for `ready` itself.
+    this.registerObsidianProtocolHandler(AUTH_CALLBACK_ACTION, (params) => void this.onAuthCallback(params));
+    this.ready = (async () => {
+      await this.loadSettings();
+      this.controller = new SyncController(this.app, this.settings, () => this.saveData(this.settings));
+    })();
+    await this.ready;
     void this.controller.prepare(); // auto-load plaintext credentials (no passphrase unless E2EE is on)
 
     this.addRibbonIcon("refresh-cw", "Google Sync: sync now", () => void this.runSync());
@@ -24,7 +54,8 @@ export default class GoogleSyncPlugin extends Plugin {
         new Notice("Google Sync: locked.");
       },
     });
-    this.addSettingTab(new GoogleSyncSettingTab(this.app, this));
+    this.settingTab = new GoogleSyncSettingTab(this.app, this);
+    this.addSettingTab(this.settingTab);
 
     const onChange = debounce(
       () => {
@@ -37,21 +68,135 @@ export default class GoogleSyncPlugin extends Plugin {
     this.registerEvent(this.app.vault.on("create", onChange));
     this.registerEvent(this.app.vault.on("delete", onChange));
 
+    if (Platform.isMobileApp) {
+      this.deviceId = this.loadDeviceId();
+      await this.enableHashCache();
+      this.enableResumeSync();
+    }
+
     this.applyAutoSync();
+  }
+
+  private loadDeviceId(): string {
+    const key = `${this.manifest.id}-device-id`;
+    const stored: unknown = this.app.loadLocalStorage(key);
+    if (typeof stored === "string" && stored) return stored;
+    const id = crypto.randomUUID();
+    this.app.saveLocalStorage(key, id);
+    return id;
+  }
+
+  /**
+   * Whether automatic sync (interval, on-change, on resume) may run here. A phone
+   * can receive data.json — sign-in and baseline included — from another device
+   * through a tool that syncs `.obsidian` (iCloud, Obsidian Sync, Syncthing).
+   * Those settings must not start syncing a phone nobody set up, so on mobile
+   * automatic sync waits until the user has synced, signed in or saved
+   * credentials on this phone. Desktop: always (0.7.3 behaviour).
+   */
+  get autoSyncAllowedHere(): boolean {
+    return this.deviceId === null || this.settings.syncDevices.includes(this.deviceId);
+  }
+
+  /** Mobile: settings that carry a credential but were never set up on this phone. */
+  get settingsFromAnotherDevice(): boolean {
+    const s = this.settings;
+    return !this.autoSyncAllowedHere && (s.driveToken !== null || s.gcsToken !== null || s.gcsSecret !== null);
+  }
+
+  /** Mobile: the user set the plugin up on this phone (Sync now, a sign-in, saved HMAC credentials). */
+  async claimThisDevice(): Promise<void> {
+    if (this.deviceId === null || this.settings.syncDevices.includes(this.deviceId)) return;
+    this.settings.syncDevices.push(this.deviceId);
+    await this.saveSettings();
+  }
+
+  /**
+   * Mobile only: interval timers stop while Obsidian is in the background, so
+   * catch up when it finishes opening and whenever it returns to the foreground.
+   * `runSync(true)` already skips quietly while locked or unconfigured.
+   */
+  private enableResumeSync(): void {
+    const catchUp = () => {
+      if (shouldSyncOnResume(this.settings, Date.now())) void this.runSync(true);
+    };
+    this.app.workspace.onLayoutReady(catchUp);
+    this.registerDomEvent(document, "visibilitychange", () => {
+      if (document.visibilityState === "visible") catchUp();
+    });
+  }
+
+  /**
+   * Mobile only: remember file hashes across syncs and restarts, so a sync does
+   * not re-read the whole vault over the native bridge. Anything Obsidian sees
+   * change is evicted, so its stat is never the only thing vouching for it.
+   */
+  private async enableHashCache(): Promise<void> {
+    this.hashCache = await this.loadHashCache();
+    this.controller.hashCache = this.hashCache;
+    this.controller.maxConcurrentReads = MOBILE_MAX_CONCURRENT_READS;
+    const evict = (file: TAbstractFile) => this.hashCache?.forget(file.path);
+    this.registerEvent(this.app.vault.on("modify", evict));
+    this.registerEvent(this.app.vault.on("delete", evict));
+    this.registerEvent(
+      this.app.vault.on("rename", (file, oldPath) => {
+        evict(file);
+        this.hashCache?.forget(oldPath);
+      })
+    );
+  }
+
+  private hashCachePath(): string {
+    return normalizePath(`${this.manifest.dir ?? `${this.app.vault.configDir}/plugins/${this.manifest.id}`}/hash-cache.json`);
+  }
+
+  private async loadHashCache(): Promise<HashCache> {
+    try {
+      const path = this.hashCachePath();
+      if (!(await this.app.vault.adapter.exists(path))) return new HashCache();
+      return new HashCache(JSON.parse(await this.app.vault.adapter.read(path)));
+    } catch {
+      return new HashCache(); // unreadable or corrupt: start empty — the cost is one full read, never a wrong hash
+    }
+  }
+
+  private async saveHashCache(): Promise<void> {
+    if (!this.hashCache?.dirty) return;
+    try {
+      await this.app.vault.adapter.write(this.hashCachePath(), JSON.stringify(this.hashCache.toJSON()));
+      this.hashCache.markSaved();
+    } catch {
+      // Best effort: an unsaved cache only means re-reading files after a restart.
+    }
   }
 
   onunload(): void {
     this.stopInterval();
   }
 
+  /** Finish a phone sign-in the redirect page handed back (`obsidian://google-cloud-sync-auth`). */
+  async onAuthCallback(params: ObsidianProtocolData): Promise<void> {
+    await this.ready;
+    try {
+      const backend = await this.controller.completeRedirectLogin(params);
+      await this.claimThisDevice();
+      new Notice(`Google Sync: ${backend === "drive" ? "Google Drive" : "Google Cloud"} connected.`);
+      this.settingTab?.update();
+    } catch (e) {
+      new Notice(`Google Sync: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
   async runSync(auto = false): Promise<void> {
     if (auto && !this.controller.ready) return; // skip quietly while locked or unconfigured
+    if (auto && !this.autoSyncAllowedHere) return; // a phone whose settings came from another device
     if (this.syncing) {
       new Notice("Google Sync: a sync is already running…");
       return;
     }
     this.syncing = true;
     try {
+      if (!auto) await this.claimThisDevice(); // pressing Sync now here is setting this phone up
       const r = await this.controller.sync();
       const dels = r.deletedLocal.length + r.deletedRemote.length;
       new Notice(
@@ -61,6 +206,7 @@ export default class GoogleSyncPlugin extends Plugin {
     } catch (e) {
       new Notice(`Google Sync: ${(e as Error).message}`);
     } finally {
+      await this.saveHashCache(); // entries are valid whether or not the sync finished
       this.syncing = false;
     }
   }
@@ -92,6 +238,7 @@ export default class GoogleSyncPlugin extends Plugin {
     this.settings = Object.assign({}, DEFAULT_SETTINGS, data);
     if (!this.settings.syncState) this.settings.syncState = {};
     this.settings.backendLastSync = { ...(this.settings.backendLastSync || {}) }; // fresh object (don't share the default)
+    this.settings.syncDevices = Array.isArray(this.settings.syncDevices) ? [...this.settings.syncDevices] : []; // likewise
     this.settings.e2eeHeaders = { ...(this.settings.e2eeHeaders || {}) }; // likewise
     if (data) {
       // Migrations from the pre-0.4 single-provider model:
@@ -122,6 +269,7 @@ type ControlKey =
   | "region"
   | "service"
   | "oauthClientId"
+  | "oauthRedirectPage"
   | "syncFolder"
   | "autoSync"
   | "autoSyncMode"
@@ -157,9 +305,12 @@ class GoogleSyncSettingTab extends PluginSettingTab {
 
   private connect(which: "drive" | "gcs"): void {
     const c = this.plugin.controller;
-    const run = which === "drive" ? c.connectDrive() : c.connectGcs();
-    run.then(
-      () => {
+    c.connect(which).then(
+      (result) => {
+        if (result === "pending") {
+          this.notify("Finish signing in in your browser — Obsidian reopens when you're done.");
+          return;
+        }
         this.notify(`${which === "drive" ? "Google Drive" : "Google Cloud"} connected.`);
         this.update();
       },
@@ -189,6 +340,9 @@ class GoogleSyncSettingTab extends PluginSettingTab {
         break;
       case "oauthClientId":
         s.oauthClientId = asString(value).trim();
+        break;
+      case "oauthRedirectPage":
+        s.oauthRedirectPage = asString(value).trim();
         break;
       case "bucket":
         s.bucket = asString(value).trim();
@@ -288,12 +442,33 @@ class GoogleSyncSettingTab extends PluginSettingTab {
   getSettingDefinitions(): SettingDefinitionItem[] {
     return [
       this.reconnectNotice(),
+      ...(Platform.isMobileApp ? [this.sharedSettingsNotice()] : []),
       this.oauthClientGroup(),
       this.driveGroup(),
       this.gcsGroup(),
       this.syncGroup(),
       this.encryptionPage(),
     ];
+  }
+
+  /**
+   * Mobile: this plugin's data.json reached the phone from another device through
+   * a tool that syncs `.obsidian`. Automatic sync is held back until the user acts
+   * here (see `autoSyncAllowedHere`); say why, and how to give each device its own.
+   */
+  private sharedSettingsNotice(): SettingDefinitionItem {
+    return {
+      type: "group",
+      heading: "Settings from another device",
+      visible: () => this.plugin.settingsFromAnotherDevice,
+      items: [
+        this.buttonRow(
+          "Automatic sync is paused on this phone",
+          "This plugin's settings, sign-in included, reached this phone from another device: your vault's .obsidian folder is synced by another tool (iCloud, Obsidian Sync, Syncthing…). Nothing syncs here on its own until you sync once by hand. Because the settings are shared, signing in here also changes them on the other device; to give each device its own, exclude this plugin's folder (.obsidian/plugins/google-cloud-sync) from that other sync.",
+          [{ label: "Sync now here", cta: true, onClick: () => void this.plugin.runSync().then(() => this.update()) }]
+        ),
+      ],
+    };
   }
 
   /**
@@ -321,6 +496,10 @@ class GoogleSyncSettingTab extends PluginSettingTab {
   private oauthClientGroup(): SettingDefinitionItem {
     const s = this.plugin.settings;
     const configured = this.plugin.controller.hasOAuthClient;
+    // The phone signs in through the browser and the redirect page, which needs a
+    // "Web application" client; desktop keeps the loopback and its "Desktop app" client.
+    const mobile = Platform.isMobileApp;
+    const clientType = mobile ? "Web application" : "Desktop app";
     return {
       type: "group",
       heading: "Google OAuth client",
@@ -337,7 +516,13 @@ class GoogleSyncSettingTab extends PluginSettingTab {
               const ol = f.createEl("ol");
               ol.createEl("li", { text: "Open the Google Cloud Console credentials page and pick (or create) a project." });
               ol.createEl("li", { text: 'Enable the "Google Drive API" if you plan to sync to Drive.' });
-              ol.createEl("li", { text: 'Create credentials → OAuth client ID → application type "Desktop app".' });
+              if (mobile) {
+                ol.createEl("li", {
+                  text: 'Create credentials → OAuth client ID → application type "Web application", and add the redirect URI shown below under "Authorized redirect URIs". Use the same project as your computer so both see the same Drive files.',
+                });
+              } else {
+                ol.createEl("li", { text: 'Create credentials → OAuth client ID → application type "Desktop app".' });
+              }
               ol.createEl("li", { text: "Paste the client ID and client secret into the two rows below." });
               f.createEl("a", {
                 text: "console.cloud.google.com/apis/credentials",
@@ -358,15 +543,42 @@ class GoogleSyncSettingTab extends PluginSettingTab {
         },
         this.passwordRow(
           "OAuth client secret",
-          'Required for Google "Desktop app" clients. Stored only in this vault\'s plugin data, which is never synced.',
+          `Required for Google "${clientType}" clients. Stored only in this vault's plugin data, which is never synced.`,
           () => s.oauthClientSecret,
           (v) => {
             s.oauthClientSecret = v.trim();
             void this.plugin.saveSettings();
           }
         ),
+        ...(mobile ? this.redirectRows() : []),
       ],
     };
+  }
+
+  /** Phone only: the redirect URI to register on the Web client, and the self-hosting override. */
+  private redirectRows(): SettingGroupItem[] {
+    const uri = this.plugin.controller.redirectUri;
+    return [
+      {
+        ...this.buttonRow("Redirect URI", uri, [
+          {
+            label: "Copy",
+            onClick: () => {
+              navigator.clipboard.writeText(uri).then(
+                () => this.notify("Redirect URI copied."),
+                () => this.notify("Could not copy — select the URI and copy it by hand.")
+              );
+            },
+          },
+        ]),
+        aliases: ["redirect", "web application", "authorized redirect uris"],
+      },
+      {
+        name: "Redirect page (advanced)",
+        desc: "Only if you host the redirect page yourself. Leave blank to use the one this plugin publishes. Must match the URI registered on your client.",
+        control: { type: "text", key: "oauthRedirectPage", placeholder: REDIRECT_PAGE_URL },
+      },
+    ];
   }
 
   private driveGroup(): SettingDefinitionItem {
@@ -514,6 +726,7 @@ class GoogleSyncSettingTab extends PluginSettingTab {
                 onClick: () => {
                   void c.saveGcsCredentials(this.hmacAccessId || s.accessId, this.hmacSecret).then(
                     () => {
+                      void this.plugin.claimThisDevice();
                       this.hmacSecret = "";
                       this.notify("HMAC key saved.");
                       this.update();
