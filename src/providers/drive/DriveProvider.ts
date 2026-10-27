@@ -125,20 +125,28 @@ export class DriveProvider implements RemoteProvider {
   }
 
   async put(path: string, data: ArrayBuffer, contentType = "application/octet-stream"): Promise<PutResult> {
-    let id = (await this.locate(path))?.id;
-    if (!id) {
-      const parent = (await this.folderFor(this.dirOf(path), true)) as string;
-      const meta = JSON.stringify({ name: this.baseOf(path), parents: [parent] });
-      const cr = await this.http("POST", `${API}/files?fields=id`, await this.hdrs({ "content-type": "application/json" }), new TextEncoder().encode(meta).buffer);
-      id = (await this.json<{ id: string }>(cr, "create")).id;
+    const fields = encodeURIComponent("id,md5Checksum,modifiedTime");
+    const id = (await this.locate(path))?.id;
+    if (id) {
+      const up = await this.http("PATCH", `${UPLOAD}/files/${id}?uploadType=media&fields=${fields}`, await this.hdrs({ "content-type": contentType }), data);
+      const r = await this.json<DriveFile>(up, "upload");
+      return { version: r.md5Checksum ?? r.modifiedTime ?? "" };
     }
-    const up = await this.http(
-      "PATCH",
-      `${UPLOAD}/files/${id}?uploadType=media&fields=${encodeURIComponent("md5Checksum,modifiedTime")}`,
-      await this.hdrs({ "content-type": contentType }),
-      data
+    // A new file is created WITH its content, in one request. Creating it empty and
+    // uploading afterwards left a 0-byte file behind whenever the app died in
+    // between (routine on a phone); its fresh modifiedTime then made it look newer
+    // than the local note, so the next sync emptied the note and parked the real
+    // content in a conflict copy.
+    const parent = (await this.folderFor(this.dirOf(path), true)) as string;
+    const boundary = `gsync-${crypto.randomUUID()}`;
+    const body = multipartRelated(boundary, { name: this.baseOf(path), parents: [parent] }, data, contentType);
+    const cr = await this.http(
+      "POST",
+      `${UPLOAD}/files?uploadType=multipart&fields=${fields}`,
+      await this.hdrs({ "content-type": `multipart/related; boundary=${boundary}` }),
+      body
     );
-    const r = await this.json<DriveFile>(up, "upload");
+    const r = await this.json<DriveFile>(cr, "create");
     return { version: r.md5Checksum ?? r.modifiedTime ?? "" };
   }
 
@@ -201,4 +209,19 @@ export class DriveProvider implements RemoteProvider {
       pageToken = data.nextPageToken;
     } while (pageToken);
   }
+}
+
+/** A `multipart/related` body for files.create (RFC 2387): the JSON metadata part, then the content part. */
+function multipartRelated(boundary: string, meta: object, data: ArrayBuffer, contentType: string): ArrayBuffer {
+  const enc = new TextEncoder();
+  const head = enc.encode(
+    `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(meta)}\r\n` +
+      `--${boundary}\r\nContent-Type: ${contentType}\r\n\r\n`
+  );
+  const tail = enc.encode(`\r\n--${boundary}--`);
+  const out = new Uint8Array(head.byteLength + data.byteLength + tail.byteLength);
+  out.set(head, 0);
+  out.set(new Uint8Array(data), head.byteLength);
+  out.set(tail, head.byteLength + data.byteLength);
+  return out.buffer;
 }

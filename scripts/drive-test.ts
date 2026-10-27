@@ -28,12 +28,26 @@ function check(label: string, cond: boolean): void {
 
 const buf = (s: string): ArrayBuffer => new TextEncoder().encode(s).buffer;
 
-/** Minimal in-memory Google Drive: enough of files.list/create/upload/get/delete to exercise DriveProvider. */
+/** Minimal in-memory Google Drive: enough of files.list/create/upload/get/update(trash) to exercise DriveProvider. */
 class FakeDrive {
   private seq = 0;
-  private files = new Map<string, { id: string; name: string; mimeType: string; parent: string; content?: ArrayBuffer }>();
+  private files = new Map<string, { id: string; name: string; mimeType: string; parent: string; content?: ArrayBuffer; trashed?: boolean }>();
 
-  http: HttpSend = async (method, url, _headers, body) => {
+  http: HttpSend = async (method, url, headers, body) => {
+    // files.create with uploadType=multipart: metadata + content in one request (multipart/related).
+    if (method === "POST" && url.includes("/upload/drive/v3/files?uploadType=multipart")) {
+      const boundary = /boundary=([^;]+)/.exec(headers["content-type"] ?? "")?.[1] ?? "";
+      const parts = new TextDecoder()
+        .decode(body)
+        .split(`--${boundary}`)
+        .slice(1, -1)
+        .map((p) => p.slice(p.indexOf("\r\n\r\n") + 4).replace(/\r\n$/, ""));
+      const meta = JSON.parse(parts[0]) as { name: string; parents: string[] };
+      const content = new TextEncoder().encode(parts[1] ?? "").buffer;
+      const id = `id${++this.seq}`;
+      this.files.set(id, { id, name: meta.name, mimeType: "application/octet-stream", parent: meta.parents[0], content });
+      return this.ok({ id, md5Checksum: `m${content.byteLength}`, modifiedTime: "t" });
+    }
     if (method === "PATCH" && url.includes("/upload/drive/v3/files/")) {
       const id = url.split("/upload/drive/v3/files/")[1].split("?")[0];
       const f = this.files.get(id);
@@ -51,6 +65,13 @@ class FakeDrive {
       this.files.set(id, { id, name: meta.name, mimeType: meta.mimeType ?? "application/octet-stream", parent: meta.parents[0] });
       return this.ok({ id });
     }
+    // files.update with {trashed: true} — how DriveProvider.delete removes a file (recoverable, since 0.6.2).
+    if (method === "PATCH" && /\/drive\/v3\/files\/[^/?]+/.test(url)) {
+      const f = this.files.get(url.split("/files/")[1].split("?")[0]);
+      const meta = JSON.parse(new TextDecoder().decode(body)) as { trashed?: boolean };
+      if (f && meta.trashed === true) f.trashed = true;
+      return f ? this.ok({ id: f.id }) : this.code(404);
+    }
     if (method === "DELETE") {
       this.files.delete(url.split("/files/")[1]);
       return this.ok({});
@@ -62,7 +83,9 @@ class FakeDrive {
     const name = nameM ? nameM[1].replace(/\\(.)/g, "$1") : undefined;
     const wantFolder = q.includes(`mimeType='${FOLDER_MIME}'`);
     const wantFile = q.includes(`mimeType!='${FOLDER_MIME}'`);
+    const liveOnly = q.includes("trashed=false");
     const files = [...this.files.values()]
+      .filter((f) => !(liveOnly && f.trashed))
       .filter((f) => (!parent || f.parent === parent) && (name === undefined || f.name === name))
       .filter((f) => (!wantFolder || f.mimeType === FOLDER_MIME) && (!wantFile || f.mimeType !== FOLDER_MIME))
       .map((f) => ({ id: f.id, name: f.name, mimeType: f.mimeType, md5Checksum: f.content ? `m${f.content.byteLength}` : undefined, size: f.content ? String(f.content.byteLength) : "0" }));
@@ -119,6 +142,48 @@ async function main(): Promise<void> {
   const list2 = (await p.list()).map((o) => o.path).sort();
   check("delete removes only the target file", JSON.stringify(list2) === JSON.stringify(["a.md", "notes/deep/c.md"]));
   check("list(prefix) is scoped to the subfolder", (await p.list("notes")).map((o) => o.path).join(",") === "notes/deep/c.md");
+
+  // --- creating a file must be atomic: an app killed mid-upload must not leave an empty file behind ---
+  // (A 0-byte file with a fresh modifiedTime looks newer than the local note on the next sync and wins
+  // the conflict — the note is emptied and its content parked in a conflict copy. Seen on Android.)
+  {
+    const d = new FakeDrive();
+    let armed = false;
+    let writes = 0;
+    const dying: HttpSend = async (method, url, headers, body) => {
+      const res = await d.http(method, url, headers, body);
+      if (armed && method !== "GET") {
+        writes++;
+        throw new Error("killed"); // the request reached Drive, then the app died
+      }
+      return res;
+    };
+    const q = new DriveProvider({ appFolderName: "Obsidian Sync/V" }, async () => "tok", dying);
+    await q.put("dir/warm.md", buf("folders now exist"));
+    armed = true;
+    await q.put("dir/new.md", buf("content")).catch(() => undefined);
+    armed = false;
+    const after = await q.list();
+    const created = after.find((o) => o.path === "dir/new.md");
+    check("killed during a create: the file is either absent or complete — never empty", writes === 1 && (!created || created.size === 7));
+    check("no zero-byte file anywhere after the interrupted create", !after.some((o) => o.size === 0));
+  }
+  {
+    const d = new FakeDrive();
+    const writes: string[] = [];
+    const counting: HttpSend = (method, url, headers, body) => {
+      if (method !== "GET") writes.push(method);
+      return d.http(method, url, headers, body);
+    };
+    const q = new DriveProvider({ appFolderName: "Obsidian Sync/V" }, async () => "tok", counting);
+    await q.put("dir/warm.md", buf("folders now exist"));
+    writes.length = 0;
+    await q.put("dir/new.md", buf("content"));
+    check("a new file is created with a single write request (metadata + content together)", writes.length === 1);
+    writes.length = 0;
+    await q.put("dir/new.md", buf("content 2"));
+    check("updating an existing file is still one write request", writes.length === 1 && new TextDecoder().decode((await q.get("dir/new.md")) as ArrayBuffer) === "content 2");
+  }
 
   console.log(`\n=== drive (logic + mirror round-trip): ${failed === 0 ? "ALL PASS" : failed + " FAILED"} (${passed} passed) ===`);
   if (failed) process.exitCode = 1;
