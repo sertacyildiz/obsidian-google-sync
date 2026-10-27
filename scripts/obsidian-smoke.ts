@@ -370,6 +370,19 @@ async function main(): Promise<void> {
   await phone.runSync(true);
   check("mobile, settings from another device: automatic sync does not run", phone.controller.ready === true && phoneSyncs === 0);
   check("mobile, settings from another device: settings say so", noticeShown());
+  {
+    // The config folder is user-configurable: the notice must name the real one, never a hard-coded `.obsidian`.
+    const vault = phone.app.vault as { configDir: string };
+    const savedDir = vault.configDir;
+    const savedManifestDir = phone.manifest.dir;
+    vault.configDir = ".mycfg";
+    phone.manifest.dir = ".mycfg/plugins/google-cloud-sync";
+    const row = flat(sharedNotice()?.items ?? []).find((i: SettingDef) => typeof i.desc === "string");
+    const desc = String(row?.desc ?? "");
+    check("notice names the vault's configured config folder and plugin folder", desc.includes(".mycfg") && desc.includes(".mycfg/plugins/google-cloud-sync") && !desc.includes(".obsidian"));
+    vault.configDir = savedDir;
+    phone.manifest.dir = savedManifestDir;
+  }
   await phone.runSync(false); // the user presses Sync now on this phone
   check("mobile: Sync now runs and sets this phone up", phoneSyncs === 1 && phone.settings.syncDevices.length === 1);
   await phone.runSync(true);

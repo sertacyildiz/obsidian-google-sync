@@ -14,7 +14,7 @@ import {
 } from "obsidian";
 import { DEFAULT_APP_FOLDER, DEFAULT_SETTINGS, GoogleSyncSettings } from "./settings";
 import { SyncController } from "./SyncController";
-import { HashCache } from "./obsidian/HashCache";
+import { HashCache, HashCacheEntry } from "./obsidian/HashCache";
 import { MOBILE_MAX_CONCURRENT_READS } from "./obsidian/ObsidianLocalStore";
 import { AUTH_CALLBACK_ACTION, REDIRECT_PAGE_URL } from "./providers/google/redirectLogin";
 import { shouldSyncOnResume } from "./sync/resume";
@@ -154,7 +154,9 @@ export default class GoogleSyncPlugin extends Plugin {
     try {
       const path = this.hashCachePath();
       if (!(await this.app.vault.adapter.exists(path))) return new HashCache();
-      return new HashCache(JSON.parse(await this.app.vault.adapter.read(path)));
+      const parsed: unknown = JSON.parse(await this.app.vault.adapter.read(path));
+      // HashCache drops any entry that is not shaped like one, so a typed view of an object is safe here.
+      return new HashCache(typeof parsed === "object" && parsed !== null ? (parsed as Record<string, HashCacheEntry>) : undefined);
     } catch {
       return new HashCache(); // unreadable or corrupt: start empty — the cost is one full read, never a wrong hash
     }
@@ -457,6 +459,9 @@ class GoogleSyncSettingTab extends PluginSettingTab {
    * here (see `autoSyncAllowedHere`); say why, and how to give each device its own.
    */
   private sharedSettingsNotice(): SettingDefinitionItem {
+    // The config folder is user-configurable — name the real one, not `.obsidian`.
+    const configDir = this.app.vault.configDir;
+    const pluginDir = this.plugin.manifest.dir ?? `${configDir}/plugins/${this.plugin.manifest.id}`;
     return {
       type: "group",
       heading: "Settings from another device",
@@ -464,7 +469,7 @@ class GoogleSyncSettingTab extends PluginSettingTab {
       items: [
         this.buttonRow(
           "Automatic sync is paused on this phone",
-          "This plugin's settings, sign-in included, reached this phone from another device: your vault's .obsidian folder is synced by another tool (iCloud, Obsidian Sync, Syncthing…). Nothing syncs here on its own until you sync once by hand. Because the settings are shared, signing in here also changes them on the other device; to give each device its own, exclude this plugin's folder (.obsidian/plugins/google-cloud-sync) from that other sync.",
+          `This plugin's settings, sign-in included, reached this phone from another device: your vault's ${configDir} folder is synced by another tool (iCloud, Obsidian Sync, Syncthing…). Nothing syncs here on its own until you sync once by hand. Because the settings are shared, signing in here also changes them on the other device; to give each device its own, exclude this plugin's folder (${pluginDir}) from that other sync.`,
           [{ label: "Sync now here", cta: true, onClick: () => void this.plugin.runSync().then(() => this.update()) }]
         ),
       ],
