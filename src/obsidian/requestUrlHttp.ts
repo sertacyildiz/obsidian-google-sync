@@ -14,13 +14,33 @@ import { HttpSend } from "../providers/RemoteProvider";
 const REQUEST_TIMEOUT_MS = 120_000;
 
 /**
+ * Headers the HTTP stack writes itself, and that desktop Obsidian refuses to
+ * take from a caller: `requestUrl` hands the request to Electron's
+ * `net.request`, whose network service fails a request carrying either one with
+ * `net::ERR_INVALID_ARGUMENT` before anything is sent (issue #1; reproduced
+ * against Electron 39.7.0, Obsidian 1.13.7's runtime). The GCS authorizers still
+ * emit both — SigV4 has to sign them, and the Node transport the pilots use
+ * needs an explicit length — so they are dropped here, at the one transport that
+ * cannot carry them. The stack then sends the same host and body length that
+ * were signed, so the signature stays valid.
+ */
+const STACK_OWNED_HEADERS = new Set(["host", "content-length"]);
+
+function withoutStackOwnedHeaders(headers: Record<string, string>): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(headers)) if (!STACK_OWNED_HEADERS.has(k.toLowerCase())) out[k] = v;
+  return out;
+}
+
+/**
  * Obsidian transport for providers. `requestUrl` runs in the main process, so it
- * bypasses CORS and lets us send the `Host` + `Authorization` headers SigV4
- * needs (browser `fetch` cannot). `throw: false` → we handle non-2xx ourselves.
+ * bypasses CORS and lets us send the `Authorization` (and SigV4 `x-amz-*`)
+ * headers browser `fetch` would preflight or refuse. `throw: false` → we handle
+ * non-2xx ourselves.
  */
 export const requestUrlHttp: HttpSend = async (method, url, headers, body) => {
   const res = await withTimeout(
-    requestUrl({ url, method, headers, body, throw: false }),
+    requestUrl({ url, method, headers: withoutStackOwnedHeaders(headers), body, throw: false }),
     REQUEST_TIMEOUT_MS,
     `${method} ${hostOf(url)} timed out after ${Math.round(REQUEST_TIMEOUT_MS / 1000)}s`
   );

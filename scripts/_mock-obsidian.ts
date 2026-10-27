@@ -11,7 +11,23 @@ export function debounce<T extends (...a: unknown[]) => unknown>(fn: T): T {
 export function normalizePath(p: string): string {
   return p.replace(/\\/g, "/").replace(/\/{2,}/g, "/").replace(/^\//, "").replace(/\/$/, "");
 }
-export async function requestUrl(_o: unknown): Promise<unknown> {
+/** Every request handed to `requestUrl`, oldest first — lets transport tests see exactly what reached Obsidian. */
+export const requestUrlCalls: { url: string; method?: string; headers?: Record<string, string>; body?: ArrayBuffer }[] = [];
+
+/**
+ * Desktop `requestUrl` passes the request to Electron's `net.request`, and its
+ * network service fails any request that sets a header the HTTP stack owns —
+ * before anything is sent. Reproduced against Electron 39.7.0 (the runtime of
+ * Obsidian 1.13.7): `host` alone, or `content-length` alone, is enough. The mock
+ * enforces the same rule so a transport that leaks one fails here, not in the app.
+ */
+const STACK_OWNED = new Set(["host", "content-length"]);
+
+export async function requestUrl(o: { url: string; method?: string; headers?: Record<string, string>; body?: ArrayBuffer }): Promise<unknown> {
+  requestUrlCalls.push(o);
+  for (const name of Object.keys(o.headers ?? {})) {
+    if (STACK_OWNED.has(name.toLowerCase())) throw new Error("net::ERR_INVALID_ARGUMENT");
+  }
   return { status: 200, headers: {}, arrayBuffer: new ArrayBuffer(0), text: "" };
 }
 
