@@ -53,7 +53,9 @@ export interface GoogleSyncSettings {
 
   // --- optional content end-to-end encryption (advanced; default off) ---
   e2ee: boolean;
-  salt: string | null; // set only once a passphrase is in use
+  salt: string | null; // credential sealing only (device-local); content E2EE uses the remote header's salt
+  /** Last good E2EE header per remote folder (not secret) — restores a deleted or damaged one. */
+  e2eeHeaders: Record<string, string>;
 
   // --- per-backend last-synced baseline, keyed by backend id ("drive" | "gcs") ---
   syncState: Record<string, SyncStateData>;
@@ -89,6 +91,7 @@ export const DEFAULT_SETTINGS: GoogleSyncSettings = {
 
   e2ee: false,
   salt: null,
+  e2eeHeaders: {},
 
   syncState: {},
 };

@@ -75,6 +75,8 @@ function makeFakeHttp(record: { method: string; url: string; headers: Record<str
       return resp(200, {}, JSON.stringify({ access_token: "ACCESS-XYZ", token_type: "Bearer", expires_in: 3600 }));
     }
     if (url.includes("storage.googleapis.com")) {
+      // An empty bucket: a single object (the E2EE header, say) is not there; listing returns nothing.
+      if (method === "HEAD" || (method === "GET" && new URL(url).pathname.split("/").length > 2)) return resp(404, {}, "");
       return resp(200, { etag: '"x"' }, "<ListBucketResult></ListBucketResult>");
     }
     if (url.includes("googleapis.com/drive") || url.includes("googleapis.com/upload/drive")) {

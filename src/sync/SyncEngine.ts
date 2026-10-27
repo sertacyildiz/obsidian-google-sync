@@ -3,6 +3,7 @@ import { conflictPath, safeVaultPath } from "../util/paths";
 import { sha256Hex } from "../util/hash";
 import { Cryptor } from "./Cryptor";
 import { LocalStore } from "./LocalStore";
+import { isReservedPath } from "./reserved";
 import { FileState, LocalFile, SyncReport, SyncStateData } from "./types";
 
 /**
@@ -60,8 +61,9 @@ export class SyncEngine {
 
   async sync(prev: SyncStateData): Promise<{ state: SyncStateData; report: SyncReport }> {
     const [localList, remoteList] = await Promise.all([this.local.list(), this.remote.list(this.scope)]);
-    const localMap = new Map<string, LocalFile>(localList.map((f) => [f.path, f]));
-    const remoteMap = new Map<string, RemoteObject>(remoteList.map((o) => [o.path, o]));
+    // The plugin's own remote files (the E2EE header) are never vault content.
+    const localMap = new Map<string, LocalFile>(localList.filter((f) => !isReservedPath(f.path)).map((f) => [f.path, f]));
+    const remoteMap = new Map<string, RemoteObject>(remoteList.filter((o) => !isReservedPath(o.path)).map((o) => [o.path, o]));
 
     // Safety guard — runs BEFORE anything is applied. A correct sync deletes a
     // file only when it was synced before (present in `prev`), is unchanged on

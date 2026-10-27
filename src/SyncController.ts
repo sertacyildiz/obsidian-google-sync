@@ -16,6 +16,7 @@ import { DEFAULT_APP_FOLDER, GoogleSyncSettings, StoredSecret } from "./settings
 import { deriveAesKey } from "./crypto/aesgcm";
 import { PBKDF2_ITERATIONS, PassphraseCryptor, newSalt } from "./crypto/PassphraseCryptor";
 import { openSecret, sealSecret } from "./crypto/secret";
+import { E2EE_HEADER_PATH, readHeader, unlockRemote } from "./crypto/e2eeHeader";
 import { base64Decode, base64Encode } from "./util/base64";
 
 type BackendId = "drive" | "gcs";
@@ -30,7 +31,14 @@ type BackendId = "drive" | "gcs";
  * memory only, never stored.
  */
 export class SyncController {
+  /** Seals/opens credentials stored with a passphrase (device-local salt, `settings.salt`). */
   private key: CryptoKey | null = null;
+  /**
+   * E2EE content keys, one per remote folder (see {@link folderKey}), each with the
+   * header salt it was derived from — a key is only ever used for that folder, and
+   * only while the folder's header still names that salt.
+   */
+  private contentKeys = new Map<string, { key: CryptoKey; salt: string }>();
   private gcsSecret: string | null = null; // unsealed HMAC secret
   private gcsRefresh: string | null = null; // unsealed GCS OAuth refresh token
   private gcsAccess: { token: string; expiresAt: number } | null = null;
@@ -115,7 +123,8 @@ export class SyncController {
 
   /** Ready to sync: at least one backend is configured and E2EE (if on) is unlocked. */
   get ready(): boolean {
-    return this.activeBackends().length > 0 && (!this.settings.e2ee || this.key !== null);
+    const backends = this.activeBackends();
+    return backends.length > 0 && (!this.settings.e2ee || backends.every((id) => this.contentKeys.has(this.folderKey(id))));
   }
 
   /**
@@ -123,13 +132,78 @@ export class SyncController {
    * ones (legacy) load only when the passphrase is supplied. Called on plugin
    * load (no passphrase) and again from "Unlock" (with passphrase, for E2EE).
    */
-  async prepare(passphrase?: string): Promise<void> {
+  async prepare(passphrase?: string, confirm?: string): Promise<void> {
     if (passphrase && this.settings.salt) {
       this.key = await deriveAesKey(passphrase, base64Decode(this.settings.salt), PBKDF2_ITERATIONS);
     }
     this.gcsSecret = await this.tryLoad(this.settings.gcsSecret);
     this.gcsRefresh = await this.tryLoad(this.settings.gcsToken);
     this.driveRefresh = await this.tryLoad(this.settings.driveToken);
+    if (passphrase && this.settings.e2ee) await this.unlockContent(passphrase, confirm);
+  }
+
+  /**
+   * E2EE: derive each active backend's content key from the salt in its remote
+   * header — the same on every device, so the same passphrase opens the same
+   * files everywhere. The header is created on first use (see e2eeHeader.ts); a
+   * wrong passphrase, a folder that cannot be taken over, or a damaged header is
+   * refused and leaves E2EE locked. Each folder's header is kept locally too, to
+   * restore it if it goes missing. Keys are swapped in only when every backend
+   * unlocked, so a sync already running keeps the keys it started with.
+   */
+  private async unlockContent(passphrase: string, confirm?: string): Promise<void> {
+    const legacySalt = this.settings.salt ? base64Decode(this.settings.salt) : null;
+    const keys = new Map<string, { key: CryptoKey; salt: string }>();
+    try {
+      for (const id of this.activeBackends()) {
+        const folder = this.folderKey(id);
+        const u = await unlockRemote(this.buildProvider(id), passphrase, { legacySalt, confirm, localCopy: this.settings.e2eeHeaders[folder] ?? null });
+        keys.set(folder, { key: u.key, salt: u.salt });
+        this.settings.e2eeHeaders[folder] = u.header;
+      }
+    } catch (e) {
+      this.contentKeys = new Map();
+      throw e;
+    }
+    this.contentKeys = keys;
+    await this.persist();
+  }
+
+  /** Identifies a remote folder: backend, bucket (GCS) and remote root. */
+  private folderKey(id: BackendId): string {
+    return `${id}:${id === "gcs" ? `${this.settings.bucket}:` : ""}${this.remoteRoot(id)}`;
+  }
+
+  /**
+   * Before anything syncs, check each backend's folder against the E2EE state.
+   * E2EE off: a folder with a header is encrypted — refuse it rather than upload
+   * plaintext into it or write its ciphertext into the vault. E2EE on: the key must
+   * be for this folder, and the folder's header must still name its salt (another
+   * device may have re-initialised it, or it may have been deleted); otherwise the
+   * key is dropped and the user unlocks again.
+   */
+  private async checkFolders(backends: BackendId[]): Promise<Map<BackendId, Cryptor>> {
+    const cryptors = new Map<BackendId, Cryptor>();
+    for (const id of backends) {
+      const remote = this.buildProvider(id);
+      if (!this.settings.e2ee) {
+        if (await remote.head(E2EE_HEADER_PATH)) {
+          throw new Error("This folder is end-to-end encrypted — turn on Encrypt content in settings and unlock with its passphrase.");
+        }
+        cryptors.set(id, identityCryptor);
+        continue;
+      }
+      const folder = this.folderKey(id);
+      const entry = this.contentKeys.get(folder);
+      if (!entry) throw new Error("Unlock (passphrase) required for E2EE.");
+      const current = await readHeader(remote).catch(() => null);
+      if (!current || current.header.salt !== entry.salt) {
+        this.contentKeys.delete(folder);
+        throw new Error("This folder's encryption header has changed or is missing — Unlock again.");
+      }
+      cryptors.set(id, PassphraseCryptor.fromKey(entry.key));
+    }
+    return cryptors;
   }
 
   private async tryLoad(store: StoredSecret | null): Promise<string | null> {
@@ -149,6 +223,7 @@ export class SyncController {
 
   lock(): void {
     this.key = null;
+    this.contentKeys.clear();
     this.gcsSecret = null;
     this.gcsRefresh = null;
     this.gcsAccess = null;
@@ -218,7 +293,7 @@ export class SyncController {
           : "Nothing to sync — enable and connect Google Drive or Google Cloud in settings."
       );
     }
-    const cryptor = this.buildCryptor();
+    const cryptors = await this.checkFolders(backends); // before any backend syncs
     const merged: SyncReport = {
       uploaded: [],
       downloaded: [],
@@ -231,7 +306,7 @@ export class SyncController {
       const engine = new SyncEngine(
         new ObsidianLocalStore(this.app, this.settings.syncFolder),
         this.buildProvider(id),
-        cryptor,
+        cryptors.get(id) as Cryptor,
         () => new Date(),
         this.settings.syncFolder,
         id === "drive" ? this.settings.driveProtectLocal : this.settings.gcsProtectLocal
@@ -307,9 +382,4 @@ export class SyncController {
     return t.accessToken;
   }
 
-  private buildCryptor(): Cryptor {
-    if (!this.settings.e2ee) return identityCryptor;
-    if (!this.key) throw new Error("Unlock (passphrase) required for E2EE.");
-    return PassphraseCryptor.fromKey(this.key);
-  }
 }

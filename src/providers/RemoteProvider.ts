@@ -43,8 +43,12 @@ export type HttpSend = (
  */
 export interface RemoteProvider {
   readonly id: string;
-  /** Upload bytes at a sync-root-relative path. */
-  put(path: string, data: ArrayBuffer, contentType?: string): Promise<PutResult>;
+  /**
+   * Upload bytes at a sync-root-relative path. With `ifAbsent`, only create: if
+   * the object already exists, nothing is written and {@link PreconditionFailed}
+   * is thrown (used for the E2EE header, which two devices may create at once).
+   */
+  put(path: string, data: ArrayBuffer, contentType?: string, opts?: { ifAbsent?: boolean }): Promise<PutResult>;
   /** Download bytes; `null` if the object does not exist. */
   get(path: string): Promise<ArrayBuffer | null>;
   /** Metadata only; `null` if absent. */
@@ -53,4 +57,12 @@ export interface RemoteProvider {
   delete(path: string): Promise<void>;
   /** List objects under an optional prefix (handles pagination internally). */
   list(prefix?: string): Promise<RemoteObject[]>;
+}
+
+/** A create-only `put` found the object already there; nothing was written. */
+export class PreconditionFailed extends Error {
+  constructor(readonly path: string) {
+    super(`${path} already exists`);
+    this.name = "PreconditionFailed";
+  }
 }

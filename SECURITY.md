@@ -45,7 +45,17 @@ public issue. You will get a response as soon as possible.
 - **End-to-end content encryption (optional, recommended).** With E2EE enabled,
   files are encrypted on-device before upload, so a credential or backend
   compromise does not expose note content. A forgotten passphrase means the
-  content cannot be recovered — the inherent cost of true E2EE.
+  content cannot be recovered — the inherent cost of true E2EE. The key is
+  derived on each device from your passphrase (PBKDF2-SHA256) and a random salt
+  kept in a small plaintext file at the remote folder's root
+  (`.gsync-e2ee.json`), so every device derives the same key. That file holds no
+  secret: the salt, the work factor, and a fixed string encrypted with the key,
+  which lets a device reject a wrong passphrase before it syncs — and makes an
+  edited header (say, a weaker work factor) fail to open rather than be trusted.
+  The passphrase is asked twice when a folder is first encrypted. E2EE starts
+  only on an empty remote folder; a device with E2EE switched off refuses to sync
+  with an encrypted folder, and an unlocked device re-checks the folder's header
+  before every sync, so it never writes with a key the folder no longer records.
 
 ## Supported versions
 

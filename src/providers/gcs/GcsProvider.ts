@@ -1,4 +1,4 @@
-import { HttpResponse, HttpSend, PutResult, RemoteObject, RemoteProvider } from "../RemoteProvider";
+import { HttpResponse, HttpSend, PreconditionFailed, PutResult, RemoteObject, RemoteProvider } from "../RemoteProvider";
 import { GcsAuthorizer } from "./auth";
 import { encodeKeyPath } from "./sigv4";
 
@@ -46,8 +46,12 @@ export class GcsProvider implements RemoteProvider {
     return this.http(method, url.toString(), headers, payload);
   }
 
-  async put(path: string, data: ArrayBuffer, contentType = "application/octet-stream"): Promise<PutResult> {
-    const res = await this.send("PUT", this.objectUrl(path), data, { "content-type": contentType });
+  async put(path: string, data: ArrayBuffer, contentType = "application/octet-stream", opts?: { ifAbsent?: boolean }): Promise<PutResult> {
+    const headers: Record<string, string> = { "content-type": contentType };
+    // Generation 0 = "only if no live object exists": GCS refuses the write atomically.
+    if (opts?.ifAbsent) headers["x-goog-if-generation-match"] = "0";
+    const res = await this.send("PUT", this.objectUrl(path), data, headers);
+    if (opts?.ifAbsent && res.status === 412) throw new PreconditionFailed(path);
     if (res.status < 200 || res.status >= 300) throw await gcsError("PUT", path, res);
     return { version: versionOf(res) };
   }

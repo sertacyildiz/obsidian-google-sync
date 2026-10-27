@@ -92,6 +92,7 @@ export default class GoogleSyncPlugin extends Plugin {
     this.settings = Object.assign({}, DEFAULT_SETTINGS, data);
     if (!this.settings.syncState) this.settings.syncState = {};
     this.settings.backendLastSync = { ...(this.settings.backendLastSync || {}) }; // fresh object (don't share the default)
+    this.settings.e2eeHeaders = { ...(this.settings.e2eeHeaders || {}) }; // likewise
     if (data) {
       // Migrations from the pre-0.4 single-provider model:
       if (!this.settings.oauthClientId && data.driveClientId) this.settings.oauthClientId = data.driveClientId;
@@ -144,6 +145,7 @@ class GoogleSyncSettingTab extends PluginSettingTab {
   private hmacAccessId = "";
   private hmacSecret = "";
   private passphrase = "";
+  private passphraseConfirm = "";
 
   constructor(app: App, private readonly plugin: GoogleSyncPlugin) {
     super(app, plugin);
@@ -617,13 +619,29 @@ class GoogleSyncSettingTab extends PluginSettingTab {
           () => "",
           (v) => (this.passphrase = v)
         ),
+        this.passwordRow(
+          "Confirm passphrase",
+          "Only the first time a folder is encrypted: type the passphrase again, so a typo cannot become the folder's passphrase.",
+          () => "",
+          (v) => (this.passphraseConfirm = v)
+        ),
         this.buttonRow("Unlock", "Derive the key from the passphrase above.", [
           {
             label: "Unlock",
             onClick: () => {
-              void c.prepare(this.passphrase || undefined).then(
-                () => this.notify(c.ready ? "unlocked." : "nothing to unlock yet."),
-                (e: unknown) => this.notify(e instanceof Error ? e.message : String(e))
+              const attempt = c.prepare(this.passphrase || undefined, this.passphraseConfirm || undefined);
+              // Forget both fields either way, so a later Unlock never reuses a passphrase silently.
+              this.passphrase = "";
+              this.passphraseConfirm = "";
+              void attempt.then(
+                () => {
+                  this.notify(c.ready ? "unlocked." : "nothing to unlock yet.");
+                  this.update();
+                },
+                (e: unknown) => {
+                  this.notify(e instanceof Error ? e.message : String(e));
+                  this.update();
+                }
               );
             },
           },

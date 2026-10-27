@@ -1,4 +1,4 @@
-import { HttpResponse, HttpSend, PutResult, RemoteObject, RemoteProvider } from "../RemoteProvider";
+import { HttpResponse, HttpSend, PreconditionFailed, PutResult, RemoteObject, RemoteProvider } from "../RemoteProvider";
 
 const API = "https://www.googleapis.com/drive/v3";
 const UPLOAD = "https://www.googleapis.com/upload/drive/v3";
@@ -119,14 +119,18 @@ export class DriveProvider implements RemoteProvider {
     const parent = await this.folderFor(this.dirOf(path), false);
     if (!parent) return null;
     const q = `name='${escapeDriveQuery(this.baseOf(path))}' and '${parent}' in parents and mimeType!='${FOLDER_MIME}' and trashed=false`;
-    const res = await this.http("GET", `${API}/files?q=${encodeURIComponent(q)}&fields=${encodeURIComponent("files(id,md5Checksum,modifiedTime,size)")}&spaces=drive`, await this.hdrs());
+    // Drive allows several files with one name; always resolve to the oldest, so every device sees the same one.
+    const res = await this.http("GET", `${API}/files?q=${encodeURIComponent(q)}&orderBy=createdTime&fields=${encodeURIComponent("files(id,md5Checksum,modifiedTime,size)")}&spaces=drive`, await this.hdrs());
     const f = (await this.json<{ files?: DriveFile[] }>(res, "find")).files?.[0];
     return f?.id ? { id: f.id, version: f.md5Checksum ?? f.modifiedTime ?? "", size: Number(f.size ?? 0), mtime: msOf(f.modifiedTime) } : null;
   }
 
-  async put(path: string, data: ArrayBuffer, contentType = "application/octet-stream"): Promise<PutResult> {
+  async put(path: string, data: ArrayBuffer, contentType = "application/octet-stream", opts?: { ifAbsent?: boolean }): Promise<PutResult> {
     const fields = encodeURIComponent("id,md5Checksum,modifiedTime");
     const id = (await this.locate(path))?.id;
+    // Drive has no create-if-absent; a concurrent create can still slip in, and the
+    // oldest-first lookup above then makes every device settle on the same file.
+    if (id && opts?.ifAbsent) throw new PreconditionFailed(path);
     if (id) {
       const up = await this.http("PATCH", `${UPLOAD}/files/${id}?uploadType=media&fields=${fields}`, await this.hdrs({ "content-type": contentType }), data);
       const r = await this.json<DriveFile>(up, "upload");
